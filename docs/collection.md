@@ -48,3 +48,9 @@ Phase 3a-i (this step) begins the Immix transition: sweep additionally computes 
 - **GC-managed types must be trivially relocatable.** When the collector evacuates a sparsely-live block (phase 3b), it moves live objects to a new location via `memcpy` and abandons the old location without calling the destructor. For this to be safe, a bit-copy must produce a valid live object at the new location. Most sensible types satisfy this — plain aggregates, types with `gc_ptr<T>` fields and primitive members, types with trivially-relocatable RAII members (`std::unique_ptr`, `std::shared_ptr`, `std::string` without SBO, `std::vector` on most implementations). Types with **self-referential internal pointers** (`std::list`, `std::deque`, types storing `this` or the address of a member) are not trivially relocatable — put the bulk in a separately-allocated buffer and hold a `gc_ptr` to it instead. Where the compiler supports it, `TypeInfoFor<T>::value`'s instantiation `static_assert`s `__is_trivially_relocatable(T)`; otherwise the constraint is documented-only and the consumer is responsible.
 
 Runtime-detectable violations of this contract abort.
+
+## Formal model
+
+The `collect()` state machine — phases, block-set transitions, recycle-list interaction — is modelled in TLA+ at [`specs/collect.tla`](../specs/collect.tla), verified by TLC against the invariants `NoSelfEvacuation` and `RecycleCleanDuringEvac`. The spec was introduced alongside phase 3b-ii after a between-phase invariant violation (recycle list surviving into evacuation) produced a cascading self-iteration bug in the evacuator. Single-threaded bugs at phase boundaries are TLA+ territory just as multi-threaded ones are.
+
+Future phases extend the spec rather than replace it — phase 3.5 multi-mutator STW and phase 4 concurrent mark are planned to land together with their own TLA+ specs, per the commitment in [`docs/design.md`](design.md).
