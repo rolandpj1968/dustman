@@ -149,6 +149,76 @@ Implementation follows a pragmatic migration path, but the API and header layout
 
 The public API should not shift meaningfully across these phases.
 
+## Testing and verification
+
+Garbage collectors fail in asymmetric, hard-to-reproduce ways:
+
+- **False retention** (the GC keeps an object it could have freed) is a performance bug. Detected by heap-size assertions. Embarrassing but harmless.
+- **False reclamation** (the GC frees an object that is still reachable) is a silent data-corruption catastrophe, typically surfacing weeks after the offending allocation as a crash in unrelated consumer code. A tracer that forgets a single field can lurk for months.
+
+Dustman's test strategy biases aggressively toward catching false reclamation. Several features exist specifically to make the collector testable and must be designed in from the start, not bolted on.
+
+### Testability as a design property
+
+The following hooks are built into dustman's core, not retrofitted into a separate testing layer:
+
+- **Stress mode.** Every allocation triggers a full GC. Any tracer that forgets a field is caught the first time that field is read after allocation. The single highest-yield test mode.
+- **Deterministic GC.** In test mode, collections trigger only at explicit points — no timers, no heuristics, no scheduler. Randomised tests are reproducible from a seed.
+- **Heap verifier.** An O(heap) invariant sweep: every `gc_ptr` resolves to a live object with a valid `TypeInfo*`; mark bits are consistent; no cross-generation pointers exist outside the remembered set. Callable after any safepoint in debug builds.
+- **Poison-on-reclaim.** Reclaimed memory is overwritten with a distinctive pattern in debug builds. Use-after-free surfaces as an immediate crash rather than a silent mis-read.
+- **Safepoint injection.** Tests can force a safepoint at arbitrary mutator points.
+- **Allocation-site tagging.** Each object records its allocation site in debug builds, for leak and retention analysis.
+
+### Test categories
+
+1. **Unit** — block pool, line metadata, TLAB, write barrier, mark bitmap, `FieldList` expansion. Fast, isolated, cover individual components.
+2. **Integration** — hand-built object graphs, allocate + collect cycles, tracer correctness. End-to-end but deterministic.
+3. **Property-based** — seeded generators produce random-but-structurally-valid object graphs and mutation sequences. After each GC, invariants are checked. The main defence against "the collector works on tests we wrote".
+4. **Fuzz** — distinct from property-based. Coverage-guided mutation of API call sequences (allocate, assign, safepoint, trigger-GC, ...) via **libFuzzer**, with **libprotobuf-mutator** providing a structured grammar so mutations stay decodable. Reaches states no human would script. A specific sub-mode fuzzes *tracers themselves* — generates correct and deliberately-buggy tracers and asserts that stress mode + heap verifier detect the bad ones, testing the testing infrastructure.
+5. **Stress / torture** — long-running, high allocation pressure, many GC cycles. Exercises TLAB refill, block recycling, evacuation, remembered set maintenance under load.
+6. **Sanitisers** — AddressSanitizer and UndefinedBehaviorSanitizer throughout. ThreadSanitizer added once concurrent marking lands.
+7. **Benchmarks** — allocation throughput, GC pause time, heap overhead. Tracked as a separate gate; not correctness tests, but essential for catching performance regressions.
+
+Both positive and negative tests are written for every feature: the former verifies *the GC collects what it should*, the latter verifies *the GC does not collect what it should not*.
+
+### Formal methods: TLA+ for the concurrent protocols
+
+The hardest GC bugs hide in concurrent protocols — write barriers interacting with concurrent marking, safepoint synchronisation, remembered set updates under mutation, TLAB refill under contention. Testing fundamentally cannot exhaustively exercise the interleavings that matter.
+
+The appropriate tool is **TLA+**: a specification language plus model checker, well-suited to concurrent protocols, with a strong track record on industrial systems. We use it not to verify the C++ code directly, but to verify the *algorithms* the C++ implements.
+
+TLA+ specifications are written and maintained in the repo for each load-bearing concurrent protocol:
+
+- The tri-colour invariant under concurrent marking
+- The write barrier protocol
+- The safepoint handshake (mutators yielding cooperatively)
+- The remembered set protocol for generational collection
+- TLAB refill and block recycling under concurrent allocation
+
+Each spec is a first-class artifact. Protocol changes are made in the spec first, re-checked, and only then implemented in C++. A spec that drifts from the implementation creates false confidence, so discipline matters — but the alternative (testing alone) is strictly worse for protocols at this level of concurrency.
+
+As a bonus, a TLA+ model of the write barrier is simultaneously the clearest explanation of the write barrier anyone will ever read.
+
+### Lightweight executable specifications
+
+Three complementary forms of lightweight verification fall out of the design:
+
+- **Runtime assertion of model invariants.** Every invariant the TLA+ spec proves has a corresponding debug-build assertion in C++. The spec and the code converge at the assertion.
+- **Heap verifier as executable spec.** The verifier's post-conditions *are* the specification of heap well-formedness. Runnable against any real heap at any safepoint.
+- **Reference implementation for differential testing.** A deliberately slow, obviously-correct mark-sweep collector runs in debug mode alongside the real collector. The real collector is correct iff the two agree on reachability. Catches divergence without requiring a proof.
+
+### Explicit non-goal: source-level proofs
+
+Coq/Iris-level proofs of the C++ implementation itself are **out of scope**. Prior work exists (CertiCoq's verified GC, Iris separation-logic proofs of heap-manipulating programs), and the techniques are well-suited to the domain. But proof engineering at that level is a multi-year project in itself, and the gap between extracted Coq code and idiomatic C++ means some verification gap always remains. A research partnership could pick this up later; the design must not depend on it.
+
+### Tooling
+
+- **Tests:** [Catch2 v3](https://github.com/catchorg/Catch2). Minimal dependency, expressive, a small compiled helper library. Chosen over GoogleTest for lighter weight and cleaner ergonomics.
+- **Benchmarks:** [Google Benchmark](https://github.com/google/benchmark). Handles warm-up, statistical analysis, and regression tracking properly.
+- **Fuzzing:** libFuzzer (Clang built-in, ASan-integrated) + libprotobuf-mutator for structure-aware mutation of API call sequences.
+- **Sanitisers:** AddressSanitizer and UndefinedBehaviorSanitizer in default CI builds; ThreadSanitizer added once concurrent marking lands.
+- **Model checking:** the TLC model checker (TLA+ reference implementation) runs in CI on any change to a `.tla` spec file.
+
 ## Future: C++26 static reflection
 
 C++26 adds compile-time reflection (P2996): templates can introspect a type's members — names, types, offsets, access specifiers. For dustman this means a `Tracer<T>` specialisation can be generated automatically by walking `T`'s members at compile time and emitting `v.visit(...)` calls for the ones that are `gc_ptr<U>`.
