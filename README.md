@@ -40,6 +40,31 @@ Implementation follows a pragmatic migration path, but design is the hard part â
 
 See [docs/design.md](docs/design.md) for architecture, the precise-tracing contract, API direction, and rationale.
 
+## Building
+
+Dustman uses CMake (â‰¥ 3.14) with a C++17 compiler. From the repository root:
+
+```bash
+cmake -S . -B build
+cmake --build build
+```
+
+Tests and benchmarks are built by default when dustman is the top-level CMake project, and can be disabled via `-DDUSTMAN_BUILD_TESTS=OFF` / `-DDUSTMAN_BUILD_BENCHMARKS=OFF` when dustman is consumed via `add_subdirectory`.
+
+Run the tests via CTest:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+Run benchmarks directly:
+
+```bash
+./build/benchmarks/dustman_bench
+```
+
+Tests use [Catch2 v3](https://github.com/catchorg/Catch2) and benchmarks use [Google Benchmark](https://github.com/google/benchmark); both are fetched automatically via CMake's `FetchContent`.
+
 ## Status
 
 Early design phase. API, visitor mechanism, and core data structures are under active discussion.
