@@ -28,3 +28,8 @@ compile_commands.json
 # Misc
 *.log
 core
+
+# TLC model-checker artifacts
+specs/states/
+specs/collect_TTrace_*.bin
+specs/collect_TTrace_*.tla

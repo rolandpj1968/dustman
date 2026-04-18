@@ -93,10 +93,30 @@ MarkDone ==
 ClassifyAndClearRecycle(to_flag) ==
   /\ phase = "classifying"
   /\ to_flag \subseteq Blocks
+  \* Model constraint: leave at least one non-flagged block available as an
+  \* evacuation target.  In reality the allocator falls back to acquiring
+  \* a fresh block from the OS (alloc_fresh_small_block), which the model's
+  \* bounded universe can't represent directly; this constraint avoids a
+  \* spurious deadlock in the "all blocks flagged simultaneously" state.
+  /\ (Blocks \ to_flag) # {}
   /\ flagged' = to_flag
   /\ recycle' = {}
   /\ phase' = "evacuating"
   /\ UNCHANGED <<evacuated_srcs, target_blocks>>
+
+(*************************************************************************)
+(* Alternative Classify that does NOT clear the recycle list.  Unused in *)
+(* Next below; documents the negative-path scenario.  Swapping           *)
+(* ClassifyAndClearRecycle for this in Next produces an invariant        *)
+(* violation -- the bug we hit in phase 3b-ii.                            *)
+(*************************************************************************)
+ClassifyWithoutClearingRecycle(to_flag) ==
+  /\ phase = "classifying"
+  /\ to_flag \subseteq Blocks
+  /\ (Blocks \ to_flag) # {}
+  /\ flagged' = to_flag
+  /\ phase' = "evacuating"
+  /\ UNCHANGED <<recycle, evacuated_srcs, target_blocks>>
 
 (*************************************************************************)
 (* Evacuate one source block.  The target is selected by alloc_slow_     *)
@@ -170,18 +190,5 @@ Invariant ==
   /\ TypeOK
   /\ NoSelfEvacuation
   /\ RecycleCleanDuringEvac
-
-(*************************************************************************)
-(* Alternative Classify that does NOT clear the recycle list.  Keeping  *)
-(* this in the spec (unused in Spec above) documents the negative-path  *)
-(* scenario: swapping ClassifyAndClearRecycle for this in Next produces *)
-(* an invariant violation, which is the bug we hit in phase 3b-ii.       *)
-(*************************************************************************)
-ClassifyWithoutClearingRecycle(to_flag) ==
-  /\ phase = "classifying"
-  /\ to_flag \subseteq Blocks
-  /\ flagged' = to_flag
-  /\ phase' = "evacuating"
-  /\ UNCHANGED <<recycle, evacuated_srcs, target_blocks>>
 
 =============================================================================
