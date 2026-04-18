@@ -37,20 +37,19 @@ public:
   void visit(dustman::gc_ptr_base& p) override { visited.push_back(p.load()); }
 };
 
-}  // namespace
+} // namespace
 
-template<>
-struct dustman::Tracer<TwoFields>
-    : dustman::FieldList<TwoFields, &TwoFields::a, &TwoFields::b> {};
+template <>
+struct dustman::Tracer<TwoFields> : dustman::FieldList<TwoFields, &TwoFields::a, &TwoFields::b> {};
 
-template<>
+template <>
 struct dustman::Tracer<ThreeFields>
     : dustman::FieldList<ThreeFields, &ThreeFields::x, &ThreeFields::y, &ThreeFields::z> {};
 
-template<>
+template <>
 struct dustman::Tracer<NoFields> : dustman::FieldList<NoFields> {};
 
-template<>
+template <>
 struct dustman::Tracer<HandRolled> {
   static void trace(HandRolled& obj, dustman::Visitor& v) {
     v.visit(obj.first);
@@ -59,10 +58,10 @@ struct dustman::Tracer<HandRolled> {
 };
 
 TEST_CASE("FieldList visits every declared field in order", "[tracer]") {
-  Leaf la{1}, lb{2};
+  Leaf la {1}, lb {2};
   TwoFields obj;
-  obj.a = dustman::gc_ptr<Leaf>{&la};
-  obj.b = dustman::gc_ptr<Leaf>{&lb};
+  obj.a = dustman::gc_ptr<Leaf> {&la};
+  obj.b = dustman::gc_ptr<Leaf> {&lb};
 
   CollectingVisitor v;
   dustman::Tracer<TwoFields>::trace(obj, v);
@@ -73,11 +72,11 @@ TEST_CASE("FieldList visits every declared field in order", "[tracer]") {
 }
 
 TEST_CASE("FieldList handles more than two fields", "[tracer]") {
-  Leaf a{1}, b{2}, c{3};
+  Leaf a {1}, b {2}, c {3};
   ThreeFields obj;
-  obj.x = dustman::gc_ptr<Leaf>{&a};
-  obj.y = dustman::gc_ptr<Leaf>{&b};
-  obj.z = dustman::gc_ptr<Leaf>{&c};
+  obj.x = dustman::gc_ptr<Leaf> {&a};
+  obj.y = dustman::gc_ptr<Leaf> {&b};
+  obj.z = dustman::gc_ptr<Leaf> {&c};
 
   CollectingVisitor v;
   dustman::Tracer<ThreeFields>::trace(obj, v);
@@ -96,11 +95,11 @@ TEST_CASE("Empty FieldList visits nothing", "[tracer]") {
 }
 
 TEST_CASE("Hand-written Tracer skips non-gc fields", "[tracer]") {
-  Leaf la{10}, lb{20};
+  Leaf la {10}, lb {20};
   HandRolled obj;
-  obj.first = dustman::gc_ptr<Leaf>{&la};
+  obj.first = dustman::gc_ptr<Leaf> {&la};
   obj.payload = 99;
-  obj.second = dustman::gc_ptr<Leaf>{&lb};
+  obj.second = dustman::gc_ptr<Leaf> {&lb};
 
   CollectingVisitor v;
   dustman::Tracer<HandRolled>::trace(obj, v);

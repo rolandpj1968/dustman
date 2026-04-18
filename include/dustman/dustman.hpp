@@ -15,4 +15,4 @@ inline constexpr int version_major = DUSTMAN_VERSION_MAJOR;
 inline constexpr int version_minor = DUSTMAN_VERSION_MINOR;
 inline constexpr int version_patch = DUSTMAN_VERSION_PATCH;
 
-}  // namespace dustman
+} // namespace dustman

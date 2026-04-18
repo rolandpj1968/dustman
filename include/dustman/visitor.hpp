@@ -14,4 +14,4 @@ public:
   virtual void visit(gc_ptr_base& p) = 0;
 };
 
-}  // namespace dustman
+} // namespace dustman

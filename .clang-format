@@ -8,7 +8,7 @@ ColumnLimit: 100
 NamespaceIndentation: None
 PointerAlignment: Left
 AccessModifierOffset: -2
-AllowShortFunctionsOnASingleLine: Empty
+AllowShortFunctionsOnASingleLine: Inline
 AlwaysBreakTemplateDeclarations: Yes
 BreakBeforeBraces: Attach
 Cpp11BracedListStyle: true
@@ -16,3 +16,4 @@ FixNamespaceComments: true
 IndentPPDirectives: AfterHash
 SortIncludes: CaseInsensitive
 SpaceAfterTemplateKeyword: true
+SpaceBeforeCpp11BracedList: true

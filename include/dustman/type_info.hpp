@@ -23,30 +23,27 @@ struct TypeInfo {
 
 namespace detail {
 
-template<typename T>
+template <typename T>
 void trace_trampoline(void* obj, Visitor& v) {
   Tracer<T>::trace(*static_cast<T*>(obj), v);
 }
 
-template<typename T>
+template <typename T>
 void destroy_trampoline(void* obj) noexcept {
-  static_cast<T*>(obj)->~T();
+  auto* t = static_cast<T*>(obj);
+  t->~T();
 }
 
-}  // namespace detail
+} // namespace detail
 
-template<typename T>
+template <typename T>
 struct TypeInfoFor {
   static_assert(std::is_nothrow_destructible_v<T>,
                 "dustman: GC-managed types must be nothrow-destructible");
 
-  static constexpr TypeInfo value{
-      sizeof(T),
-      alignof(T),
-      &detail::trace_trampoline<T>,
-      &detail::destroy_trampoline<T>,
-      0,
+  static constexpr TypeInfo value {
+      sizeof(T), alignof(T), &detail::trace_trampoline<T>, &detail::destroy_trampoline<T>, 0,
   };
 };
 
-}  // namespace dustman
+} // namespace dustman

@@ -30,12 +30,12 @@ public:
   void visit(dustman::gc_ptr_base& p) override { visited.push_back(p.load()); }
 };
 
-}  // namespace
+} // namespace
 
-template<>
+template <>
 struct dustman::Tracer<Node> : dustman::FieldList<Node, &Node::left, &Node::right> {};
 
-template<>
+template <>
 struct dustman::Tracer<WithDtor> : dustman::FieldList<WithDtor> {};
 
 TEST_CASE("TypeInfoFor reports correct size and alignment", "[type_info]") {
@@ -47,8 +47,8 @@ TEST_CASE("TypeInfoFor reports correct size and alignment", "[type_info]") {
 TEST_CASE("TypeInfo.trace dispatches to the registered Tracer", "[type_info]") {
   Leaf la, lb;
   Node node;
-  node.left = dustman::gc_ptr<Leaf>{&la};
-  node.right = dustman::gc_ptr<Leaf>{&lb};
+  node.left = dustman::gc_ptr<Leaf> {&la};
+  node.right = dustman::gc_ptr<Leaf> {&lb};
 
   const dustman::TypeInfo& ti = dustman::TypeInfoFor<Node>::value;
 
@@ -65,7 +65,7 @@ TEST_CASE("TypeInfo.destroy invokes the destructor", "[type_info]") {
   destruction_counter = 0;
 
   alignas(WithDtor) unsigned char storage[sizeof(WithDtor)];
-  WithDtor* obj = new (storage) WithDtor{};
+  WithDtor* obj = new (storage) WithDtor {};
 
   const dustman::TypeInfo& ti = dustman::TypeInfoFor<WithDtor>::value;
   ti.destroy(obj);

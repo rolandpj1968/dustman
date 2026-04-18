@@ -16,7 +16,7 @@ protected:
   void* raw_ = nullptr;
 };
 
-template<typename T>
+template <typename T>
 class gc_ptr : public gc_ptr_base {
 public:
   gc_ptr() noexcept = default;
@@ -34,24 +34,12 @@ public:
     return *this;
   }
 
-  friend bool operator==(const gc_ptr& a, const gc_ptr& b) noexcept {
-    return a.load() == b.load();
-  }
-  friend bool operator!=(const gc_ptr& a, const gc_ptr& b) noexcept {
-    return a.load() != b.load();
-  }
-  friend bool operator==(const gc_ptr& a, std::nullptr_t) noexcept {
-    return a.load() == nullptr;
-  }
-  friend bool operator!=(const gc_ptr& a, std::nullptr_t) noexcept {
-    return a.load() != nullptr;
-  }
-  friend bool operator==(std::nullptr_t, const gc_ptr& a) noexcept {
-    return a.load() == nullptr;
-  }
-  friend bool operator!=(std::nullptr_t, const gc_ptr& a) noexcept {
-    return a.load() != nullptr;
-  }
+  friend bool operator==(const gc_ptr& a, const gc_ptr& b) noexcept { return a.load() == b.load(); }
+  friend bool operator!=(const gc_ptr& a, const gc_ptr& b) noexcept { return a.load() != b.load(); }
+  friend bool operator==(const gc_ptr& a, std::nullptr_t) noexcept { return a.load() == nullptr; }
+  friend bool operator!=(const gc_ptr& a, std::nullptr_t) noexcept { return a.load() != nullptr; }
+  friend bool operator==(std::nullptr_t, const gc_ptr& a) noexcept { return a.load() == nullptr; }
+  friend bool operator!=(std::nullptr_t, const gc_ptr& a) noexcept { return a.load() != nullptr; }
 };
 
-}  // namespace dustman
+} // namespace dustman

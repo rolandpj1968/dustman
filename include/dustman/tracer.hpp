@@ -4,14 +4,12 @@
 
 namespace dustman {
 
-template<typename T>
+template <typename T>
 struct Tracer;
 
-template<typename T, auto... Ms>
+template <typename T, auto... Ms>
 struct FieldList {
-  static void trace(T& obj, Visitor& v) {
-    (v.visit(obj.*Ms), ...);
-  }
+  static void trace(T& obj, Visitor& v) { (v.visit(obj.*Ms), ...); }
 };
 
-}  // namespace dustman
+} // namespace dustman

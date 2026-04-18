@@ -6,6 +6,8 @@
 
 namespace dustman::detail {
 
-int placeholder_symbol() noexcept { return 0; }
+int placeholder_symbol() noexcept {
+  return 0;
+}
 
-}  // namespace dustman::detail
+} // namespace dustman::detail
