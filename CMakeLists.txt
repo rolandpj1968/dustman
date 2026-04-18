@@ -31,7 +31,7 @@ add_library(dustman)
 add_library(dustman::dustman ALIAS dustman)
 
 target_sources(dustman PRIVATE
-  src/placeholder.cpp
+  src/heap.cpp
 )
 
 target_include_directories(dustman
@@ -47,6 +47,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     -Wall -Wextra -Wpedantic
     -Wshadow -Wnon-virtual-dtor -Wold-style-cast
     -Wconversion
+    -fno-exceptions
   )
 elseif(MSVC)
   target_compile_options(dustman PRIVATE /W4)

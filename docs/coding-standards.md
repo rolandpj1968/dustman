@@ -87,9 +87,11 @@ IWYU ("include what you use"): every file includes what it references directly. 
 
 ## 11. Error handling
 
-- Exceptions are used **only for genuinely unexpected failures**, primarily out-of-memory (`std::bad_alloc`). Normal error paths use return types (`std::optional`, `std::pair<bool, T>`, custom error enums).
-- **Never throw** from destructors, callbacks, trampolines, finalisers, or the allocation fast path.
-- Under `-fno-exceptions`, throw sites become `std::terminate`. Design so that this is acceptable behaviour at every throw site.
+- **Exceptions are forbidden in library code.** Library `.cpp` files are compiled with `-fno-exceptions`; headers do not throw, do not contain `try`/`catch`, and do not rely on RAII cleanup along exceptional paths.
+- **Fatal conditions** (out-of-memory being the primary case) call a `dustman::detail::fatal_*()` helper which aborts. A future configurable hook may log or write a crash dump before aborting; the call sites do not change.
+- Normal error paths use return types (`std::optional`, `std::pair<bool, T>`, custom error enums).
+- This rule applies to library code only. **Tests use Catch2** and require exceptions to be enabled in their compilation units. Consumer code may use exceptions; consumer-type constructor throws may propagate through our inline templates, but they never enter our compiled `.cpp` files because our library never propagates exceptions across its own frames.
+- A consequence: GC-managed consumer types are effectively required to be nothrow-constructible in practice. A throwing constructor under `-fno-exceptions` would `std::terminate`.
 
 ## 12. RTTI
 

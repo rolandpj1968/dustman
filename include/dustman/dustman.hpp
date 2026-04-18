@@ -4,6 +4,7 @@
 #define DUSTMAN_VERSION_MINOR 0
 #define DUSTMAN_VERSION_PATCH 1
 
+#include "dustman/alloc.hpp"
 #include "dustman/gc_ptr.hpp"
 #include "dustman/tracer.hpp"
 #include "dustman/type_info.hpp"

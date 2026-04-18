@@ -13,6 +13,7 @@ FetchContent_MakeAvailable(benchmark)
 
 add_executable(dustman_bench
   bench_smoke.cpp
+  bench_alloc.cpp
 )
 
 target_link_libraries(dustman_bench PRIVATE
