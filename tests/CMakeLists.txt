@@ -9,6 +9,9 @@ FetchContent_MakeAvailable(Catch2)
 
 add_executable(dustman_tests
   test_smoke.cpp
+  test_gc_ptr.cpp
+  test_tracer.cpp
+  test_type_info.cpp
 )
 
 target_link_libraries(dustman_tests PRIVATE
