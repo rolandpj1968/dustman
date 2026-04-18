@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -25,6 +26,52 @@ struct TypeInfo {
 };
 
 namespace detail {
+
+inline constexpr std::uintptr_t forwarded_bit = 1;
+
+inline bool is_forwarded(const void* body) noexcept {
+  auto word = *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<const std::byte*>(body) -
+                                                       sizeof(void*));
+  return (word & forwarded_bit) != 0;
+}
+
+inline void* forwarded_to(const void* body) noexcept {
+  auto word = *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<const std::byte*>(body) -
+                                                       sizeof(void*));
+  return reinterpret_cast<void*>(word & ~forwarded_bit);
+}
+
+inline void set_forwarded(void* old_body, void* new_body) noexcept {
+  auto word = reinterpret_cast<std::uintptr_t>(new_body) | forwarded_bit;
+  auto* slot =
+      reinterpret_cast<std::uintptr_t*>(reinterpret_cast<std::byte*>(old_body) - sizeof(void*));
+  *slot = word;
+}
+
+enum class HeaderKind : std::uint8_t {
+  Normal,
+  Forwarded,
+};
+
+struct HeaderView {
+  HeaderKind kind;
+  const TypeInfo* type;
+  void* new_body;
+};
+
+inline HeaderView decode_header(const void* body) noexcept {
+  auto word = *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<const std::byte*>(body) -
+                                                       sizeof(void*));
+  HeaderView v {};
+  if ((word & forwarded_bit) != 0) {
+    v.kind = HeaderKind::Forwarded;
+    v.new_body = reinterpret_cast<void*>(word & ~forwarded_bit);
+  } else {
+    v.kind = HeaderKind::Normal;
+    v.type = reinterpret_cast<const TypeInfo*>(word);
+  }
+  return v;
+}
 
 template <typename T>
 void trace_trampoline(void* obj, Visitor& v) {
@@ -64,6 +111,14 @@ struct TypeInfoFor {
   static_assert(std::is_nothrow_destructible_v<T>,
                 "dustman: GC-managed types must be nothrow-destructible");
 
+#if defined(__has_builtin)
+#  if __has_builtin(__is_trivially_relocatable)
+  static_assert(__is_trivially_relocatable(T),
+                "dustman: GC-managed types must be trivially relocatable "
+                "(see consumer contract in docs/collection.md)");
+#  endif
+#endif
+
   static constexpr TypeInfo value {
       sizeof(T),
       alignof(T),
@@ -76,6 +131,7 @@ struct TypeInfoFor {
 inline const TypeInfo* type_of(const void* obj) noexcept {
   auto* bytes = reinterpret_cast<const std::byte*>(obj);
   auto* hdr = reinterpret_cast<const TypeInfo* const*>(bytes - sizeof(const TypeInfo*));
+  assert(!detail::is_forwarded(obj) && "type_of called on a forwarded object");
   return *hdr;
 }
 
