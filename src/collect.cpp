@@ -1,5 +1,6 @@
 #include "dustman/collect.hpp"
 
+#include <unordered_set>
 #include <vector>
 
 #include "dustman/alloc.hpp"
@@ -50,6 +51,46 @@ private:
   std::vector<void*> worklist_;
 };
 
+class UpdateVisitor : public Visitor {
+public:
+  void visit(gc_ptr_base& p) override {
+    void* obj = p.load();
+    if (obj == nullptr) {
+      return;
+    }
+    if (is_forwarded(obj)) {
+      obj = forwarded_to(obj);
+      p.store(obj);
+    }
+
+    const TypeInfo* ti = type_of(obj);
+    if ((ti->flags & flag_huge) != 0) {
+      if (update_huge(obj)) {
+        worklist_.push_back(obj);
+      }
+      return;
+    }
+
+    if (!visited_.insert(obj).second) {
+      return;
+    }
+    worklist_.push_back(obj);
+  }
+
+  void drain() {
+    while (!worklist_.empty()) {
+      void* obj = worklist_.back();
+      worklist_.pop_back();
+      const TypeInfo* ti = type_of(obj);
+      ti->trace(obj, *this);
+    }
+  }
+
+private:
+  std::vector<void*> worklist_;
+  std::unordered_set<void*> visited_;
+};
+
 } // namespace
 } // namespace detail
 
@@ -68,12 +109,24 @@ void collect() noexcept {
 
   detail::gc_state = detail::GcState::sweeping;
 
-  detail::small_tlab.cursor = nullptr;
-  detail::small_tlab.end = nullptr;
-  detail::medium_tlab.cursor = nullptr;
-  detail::medium_tlab.end = nullptr;
+  detail::small_tlab = {};
+  detail::medium_tlab = {};
 
-  detail::sweep_all_blocks();
+  std::uint32_t threshold = get_evacuation_threshold_percent();
+  auto sparse = detail::classify_and_destroy_dead(threshold);
+
+  for (auto* h : sparse) {
+    detail::evacuate_block(h);
+  }
+
+  detail::UpdateVisitor uv;
+  detail::visit_roots(uv);
+  uv.drain();
+
+  detail::small_tlab = {};
+  detail::medium_tlab = {};
+
+  detail::finalize_sweep();
   detail::sweep_huge();
 
   detail::gc_state = detail::GcState::idle;

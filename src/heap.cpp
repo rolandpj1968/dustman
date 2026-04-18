@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <new>
 #include <vector>
@@ -47,6 +48,7 @@ struct HugeRecord {
   void* hdr;
   std::size_t bytes;
   bool marked;
+  bool updated;
 };
 
 class Heap {
@@ -88,7 +90,7 @@ public:
       fatal_oom();
     }
     void* hdr = static_cast<std::byte*>(base) + hdr_offset;
-    huge_records_.push_back(HugeRecord {base, hdr, alloc_size, false});
+    huge_records_.push_back(HugeRecord {base, hdr, alloc_size, false, false});
     return hdr;
   }
 
@@ -97,8 +99,23 @@ public:
     std::lock_guard<std::mutex> lock(mu_);
     for (auto& rec : huge_records_) {
       if (rec.hdr == hdr_ptr) {
-        if (rec.marked) return false;
+        if (rec.marked)
+          return false;
         rec.marked = true;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool update_huge(const void* body) noexcept {
+    auto* hdr_ptr = reinterpret_cast<const std::byte*>(body) - sizeof(const TypeInfo*);
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto& rec : huge_records_) {
+      if (rec.hdr == hdr_ptr) {
+        if (rec.updated)
+          return false;
+        rec.updated = true;
         return true;
       }
     }
@@ -116,6 +133,7 @@ public:
         return true;
       }
       rec.marked = false;
+      rec.updated = false;
       return false;
     });
     huge_records_.erase(new_end, huge_records_.end());
@@ -135,7 +153,7 @@ public:
   }
 
   template <typename Pred>
-  void remove_blocks_if(Pred&& pred) {
+  void remove_blocks_if_and_rebuild_recycle(Pred&& pred) {
     std::lock_guard<std::mutex> lock(mu_);
     small_recycle_.clear();
     auto new_end = std::remove_if(blocks_.begin(), blocks_.end(), [&pred](void* block) {
@@ -172,6 +190,14 @@ public:
     return blocks_.size();
   }
 
+  // Phase A: destroy fully-dead, compute line_map for densely-live,
+  // flag sparsely-live and return them for evacuation.
+  std::vector<BlockHeader*> classify_and_destroy_dead(std::uint32_t threshold_percent) noexcept;
+
+  // Phase D: remove blocks flagged flag_block_evacuating, destroy any
+  // remaining non-forwarded objects in them, rebuild recycle list.
+  void finalize_sweep() noexcept;
+
 private:
   std::mutex mu_;
   std::vector<void*> blocks_;
@@ -202,6 +228,43 @@ void destroy_all_objects_in(BlockHeader* h) noexcept {
   }
 }
 
+void destroy_non_forwarded_in(BlockHeader* h) noexcept {
+  auto* block_base = reinterpret_cast<std::byte*>(h);
+  auto* body_start = block_base + block_header_size;
+
+  for (std::size_t slot = 0; slot < max_slots_per_block; ++slot) {
+    std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+    if ((h->start_bitmap[slot / 8] & mask) == 0)
+      continue;
+
+    auto* body_addr = body_start + slot * slot_bytes;
+    if (is_forwarded(body_addr))
+      continue;
+
+    const TypeInfo* ti = type_of(body_addr);
+    ti->destroy(body_addr);
+  }
+}
+
+std::size_t compute_live_bytes(BlockHeader* h) noexcept {
+  auto* block_base = reinterpret_cast<std::byte*>(h);
+  auto* body_start = block_base + block_header_size;
+
+  std::size_t total = 0;
+  for (std::size_t slot = 0; slot < max_slots_per_block; ++slot) {
+    std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+    if ((h->start_bitmap[slot / 8] & mask) == 0)
+      continue;
+    if ((h->mark_bitmap[slot / 8] & mask) == 0)
+      continue;
+
+    auto* body_addr = body_start + slot * slot_bytes;
+    const TypeInfo* ti = type_of(body_addr);
+    total += object_bytes_of(ti);
+  }
+  return total;
+}
+
 void compute_line_map(BlockHeader* h) noexcept {
   h->line_map.fill(0);
 
@@ -210,19 +273,15 @@ void compute_line_map(BlockHeader* h) noexcept {
 
   for (std::size_t slot = 0; slot < max_slots_per_block; ++slot) {
     std::uint8_t mask = std::uint8_t(1) << (slot % 8);
-    bool start_bit = (h->start_bitmap[slot / 8] & mask) != 0;
-    if (!start_bit)
+    if ((h->start_bitmap[slot / 8] & mask) == 0)
       continue;
-    bool mark_bit = (h->mark_bitmap[slot / 8] & mask) != 0;
-    if (!mark_bit)
+    if ((h->mark_bitmap[slot / 8] & mask) == 0)
       continue;
 
     auto* body_addr = body_start + slot * slot_bytes;
     const TypeInfo* ti = type_of(body_addr);
 
-    std::size_t alloc_bytes = sizeof(const TypeInfo*) + ti->size;
-    alloc_bytes = (alloc_bytes + slot_bytes - 1) & ~(slot_bytes - 1);
-
+    std::size_t alloc_bytes = object_bytes_of(ti);
     std::size_t header_offset = (slot - 1) * slot_bytes;
     std::size_t alloc_end_offset = header_offset + alloc_bytes;
 
@@ -266,6 +325,98 @@ void* alloc_fresh_medium_block(std::size_t size) {
 
 } // namespace
 
+std::vector<BlockHeader*>
+Heap::classify_and_destroy_dead(std::uint32_t threshold_percent) noexcept {
+  std::vector<BlockHeader*> sparse;
+  std::lock_guard<std::mutex> lock(mu_);
+
+  // Invalidate the recycle list before evacuation begins. Otherwise the
+  // evacuation's own alloc_slow_small could pop a block just flagged for
+  // evacuation, causing set_start / set_mark on the target to land in
+  // the source's bitmaps and produce a self-iterating cascade.
+  // finalize_sweep rebuilds the list from surviving blocks.
+  small_recycle_.clear();
+
+  auto new_end = std::remove_if(blocks_.begin(), blocks_.end(), [&](void* block) {
+    auto* h = static_cast<BlockHeader*>(block);
+    if (!block_has_any_mark(h)) {
+      destroy_all_objects_in(h);
+      return true;
+    }
+    std::size_t live = compute_live_bytes(h);
+    std::size_t threshold_bytes =
+        (static_cast<std::size_t>(threshold_percent) * block_body_size) / 100;
+    if (live < threshold_bytes) {
+      h->flags |= flag_block_evacuating;
+      sparse.push_back(h);
+    } else if (!is_medium_block(h)) {
+      compute_line_map(h);
+    }
+    return false;
+  });
+  blocks_.erase(new_end, blocks_.end());
+  return sparse;
+}
+
+void Heap::finalize_sweep() noexcept {
+  std::lock_guard<std::mutex> lock(mu_);
+  small_recycle_.clear();
+
+  auto new_end = std::remove_if(blocks_.begin(), blocks_.end(), [](void* block) {
+    auto* h = static_cast<BlockHeader*>(block);
+    if ((h->flags & flag_block_evacuating) != 0) {
+      destroy_non_forwarded_in(h);
+      std::free(block);
+      return true;
+    }
+    return false;
+  });
+  blocks_.erase(new_end, blocks_.end());
+
+  for (void* block : blocks_) {
+    auto* h = static_cast<BlockHeader*>(block);
+    if (!is_medium_block(h) && block_has_any_free_line(h)) {
+      small_recycle_.push_back(h);
+    }
+  }
+}
+
+void evacuate_block(BlockHeader* h) {
+  const bool medium = is_medium_block(h);
+  auto* block_base = reinterpret_cast<std::byte*>(h);
+  auto* body_start = block_base + block_header_size;
+
+  for (std::size_t slot = 0; slot < max_slots_per_block; ++slot) {
+    std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+    if ((h->start_bitmap[slot / 8] & mask) == 0)
+      continue;
+    if ((h->mark_bitmap[slot / 8] & mask) == 0)
+      continue;
+
+    auto* old_body = body_start + slot * slot_bytes;
+    const TypeInfo* ti = type_of(old_body);
+    std::size_t alloc_bytes = object_bytes_of(ti);
+
+    void* new_hdr;
+    if (medium) {
+      new_hdr = tlab_bump(medium_tlab, alloc_bytes);
+      if (new_hdr == nullptr)
+        new_hdr = alloc_slow_medium(alloc_bytes);
+    } else {
+      new_hdr = tlab_bump(small_tlab, alloc_bytes);
+      if (new_hdr == nullptr)
+        new_hdr = alloc_slow_small(alloc_bytes);
+    }
+
+    *static_cast<const TypeInfo**>(new_hdr) = ti;
+    void* new_body = static_cast<std::byte*>(new_hdr) + sizeof(const TypeInfo*);
+    std::memcpy(new_body, old_body, ti->size);
+    set_start(new_body);
+    set_mark(new_body);
+    set_forwarded(old_body, new_body);
+  }
+}
+
 void* alloc_slow_small(std::size_t size) {
   BlockHeader* current = (small_tlab.cursor != nullptr) ? header_of(small_tlab.cursor) : nullptr;
 
@@ -298,6 +449,10 @@ bool mark_huge(const void* body) noexcept {
   return Heap::instance().mark_huge(body);
 }
 
+bool update_huge(const void* body) noexcept {
+  return Heap::instance().update_huge(body);
+}
+
 void sweep_huge() noexcept {
   Heap::instance().sweep_huge();
 }
@@ -306,21 +461,16 @@ std::size_t huge_count() noexcept {
   return Heap::instance().huge_count();
 }
 
-void clear_all_marks() noexcept {
-  Heap::instance().for_each_block([](BlockHeader* h) { h->mark_bitmap.fill(0); });
+std::vector<BlockHeader*> classify_and_destroy_dead(std::uint32_t threshold_percent) noexcept {
+  return Heap::instance().classify_and_destroy_dead(threshold_percent);
 }
 
-void sweep_all_blocks() noexcept {
-  Heap::instance().remove_blocks_if([](BlockHeader* h) {
-    if (!block_has_any_mark(h)) {
-      destroy_all_objects_in(h);
-      return true;
-    }
-    if (!is_medium_block(h)) {
-      compute_line_map(h);
-    }
-    return false;
-  });
+void finalize_sweep() noexcept {
+  Heap::instance().finalize_sweep();
+}
+
+void clear_all_marks() noexcept {
+  Heap::instance().for_each_block([](BlockHeader* h) { h->mark_bitmap.fill(0); });
 }
 
 std::size_t heap_block_count() noexcept {

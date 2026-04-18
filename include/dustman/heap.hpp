@@ -1,8 +1,10 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "dustman/gc_ptr.hpp"
 
@@ -13,6 +15,18 @@ class Visitor;
 inline void safepoint() noexcept {}
 inline void attach_thread() noexcept {}
 inline void detach_thread() noexcept {}
+
+namespace detail {
+inline std::atomic<std::uint32_t> evacuation_threshold_percent_ {25};
+}
+
+inline void set_evacuation_threshold_percent(std::uint32_t p) noexcept {
+  detail::evacuation_threshold_percent_.store(p, std::memory_order_relaxed);
+}
+
+inline std::uint32_t get_evacuation_threshold_percent() noexcept {
+  return detail::evacuation_threshold_percent_.load(std::memory_order_relaxed);
+}
 
 namespace detail {
 
@@ -31,6 +45,7 @@ inline constexpr std::size_t medium_size_limit = 4 * 1024;
 inline constexpr std::size_t max_alignment = 4096;
 
 inline constexpr std::uint32_t flag_block_medium = 1u << 0;
+inline constexpr std::uint32_t flag_block_evacuating = 1u << 1;
 
 enum class GcState : std::uint8_t {
   idle,
@@ -90,6 +105,13 @@ inline void set_mark(const void* obj) noexcept {
   h->mark_bitmap[slot / 8] |= mask;
 }
 
+inline void clear_mark(const void* obj) noexcept {
+  BlockHeader* h = header_of(obj);
+  std::size_t slot = slot_index(obj);
+  std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+  h->mark_bitmap[slot / 8] &= static_cast<std::uint8_t>(~mask);
+}
+
 inline bool is_start(const void* obj) noexcept {
   BlockHeader* h = header_of(obj);
   std::size_t slot = slot_index(obj);
@@ -129,11 +151,15 @@ void* alloc_slow_medium(std::size_t size);
 void* alloc_huge(std::size_t obj_bytes, std::size_t align);
 
 bool mark_huge(const void* body) noexcept;
+bool update_huge(const void* body) noexcept;
 void sweep_huge() noexcept;
 std::size_t huge_count() noexcept;
 
+std::vector<BlockHeader*> classify_and_destroy_dead(std::uint32_t threshold_percent) noexcept;
+void evacuate_block(BlockHeader* h);
+void finalize_sweep() noexcept;
+
 void clear_all_marks() noexcept;
-void sweep_all_blocks() noexcept;
 std::size_t heap_block_count() noexcept;
 
 [[noreturn]] void fatal_oom() noexcept;

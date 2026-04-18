@@ -135,4 +135,9 @@ inline const TypeInfo* type_of(const void* obj) noexcept {
   return *hdr;
 }
 
+inline std::size_t object_bytes_of(const TypeInfo* ti) noexcept {
+  std::size_t total = sizeof(const TypeInfo*) + ti->size;
+  return (total + alignof(void*) - 1) & ~(alignof(void*) - 1);
+}
+
 } // namespace dustman
