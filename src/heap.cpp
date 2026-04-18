@@ -42,6 +42,12 @@ bool block_has_any_free_line(const BlockHeader* h) noexcept {
   return find_free_line_in(h, 0) != npos;
 }
 
+struct HugeRecord {
+  void* base;
+  std::size_t bytes;
+  bool marked;
+};
+
 class Heap {
 public:
   static Heap& instance() {
@@ -60,6 +66,51 @@ public:
     new (h) BlockHeader {};
     h->flags = flags;
     return block;
+  }
+
+  void* acquire_huge(std::size_t bytes) {
+    std::lock_guard<std::mutex> lock(mu_);
+    void* base = std::aligned_alloc(alignof(void*), bytes);
+    if (base == nullptr) {
+      fatal_oom();
+    }
+    huge_records_.push_back(HugeRecord {base, bytes, false});
+    return base;
+  }
+
+  bool mark_huge(const void* body) noexcept {
+    auto* base = reinterpret_cast<const std::byte*>(body) - sizeof(const TypeInfo*);
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto& rec : huge_records_) {
+      if (rec.base == base) {
+        if (rec.marked)
+          return false;
+        rec.marked = true;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void sweep_huge() noexcept {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto new_end = std::remove_if(huge_records_.begin(), huge_records_.end(), [](HugeRecord& rec) {
+      if (!rec.marked) {
+        void* body = static_cast<std::byte*>(rec.base) + sizeof(const TypeInfo*);
+        const TypeInfo* ti = type_of(body);
+        ti->destroy(body);
+        std::free(rec.base);
+        return true;
+      }
+      rec.marked = false;
+      return false;
+    });
+    huge_records_.erase(new_end, huge_records_.end());
+  }
+
+  std::size_t huge_count() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return huge_records_.size();
   }
 
   template <typename F>
@@ -112,6 +163,7 @@ private:
   std::mutex mu_;
   std::vector<void*> blocks_;
   std::vector<BlockHeader*> small_recycle_;
+  std::vector<HugeRecord> huge_records_;
 };
 
 bool block_has_any_mark(BlockHeader* h) noexcept {
@@ -223,6 +275,22 @@ void* alloc_slow_small(std::size_t size) {
 
 void* alloc_slow_medium(std::size_t size) {
   return alloc_fresh_medium_block(size);
+}
+
+void* alloc_huge(std::size_t size) {
+  return Heap::instance().acquire_huge(size);
+}
+
+bool mark_huge(const void* body) noexcept {
+  return Heap::instance().mark_huge(body);
+}
+
+void sweep_huge() noexcept {
+  Heap::instance().sweep_huge();
+}
+
+std::size_t huge_count() noexcept {
+  return Heap::instance().huge_count();
 }
 
 void clear_all_marks() noexcept {

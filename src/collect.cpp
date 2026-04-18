@@ -23,6 +23,13 @@ public:
     if (obj == nullptr) {
       return;
     }
+    const TypeInfo* ti = type_of(obj);
+    if ((ti->flags & flag_huge) != 0) {
+      if (mark_huge(obj)) {
+        worklist_.push_back(obj);
+      }
+      return;
+    }
     if (is_marked(obj)) {
       return;
     }
@@ -67,6 +74,7 @@ void collect() noexcept {
   detail::medium_tlab.end = nullptr;
 
   detail::sweep_all_blocks();
+  detail::sweep_huge();
 
   detail::gc_state = detail::GcState::idle;
   detail::collecting_ = false;

@@ -125,6 +125,11 @@ inline void* tlab_bump(Tlab& tlab, std::size_t size) noexcept {
 
 void* alloc_slow_small(std::size_t size);
 void* alloc_slow_medium(std::size_t size);
+void* alloc_huge(std::size_t size);
+
+bool mark_huge(const void* body) noexcept;
+void sweep_huge() noexcept;
+std::size_t huge_count() noexcept;
 
 void clear_all_marks() noexcept;
 void sweep_all_blocks() noexcept;

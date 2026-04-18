@@ -7,7 +7,7 @@ This document captures the allocation tier structure of dustman's heap, and the 
 ```
 Small    (≤ 256 B / one line)   → line-aware bump in shared small blocks     [phase 3a-ii ✔]
 Medium   (256 B .. 4 KiB)       → dedicated medium blocks, bump-only          [phase 3a-iii ✔]
-Huge     (> 4 KiB)              → mmap per object, tracked externally          [phase 3a-iv]
+Huge     (> 4 KiB)              → one aligned region per object, tracked externally [phase 3a-iv ✔]
 ```
 
 Each tier is an independent allocator path. `alloc<T>()` routes **at compile time** via `if constexpr (object_bytes<T>() ≤ threshold)`; small allocations never touch medium or huge code, and vice versa. No runtime dispatch, no branch prediction concerns, no cross-contamination between the hot path and the cold paths.
@@ -63,7 +63,7 @@ Dustman's tiers are Immix's tiers, with one deliberate simplification:
 
 - Dustman "small" ↔ Immix "small" (bump within line).
 - Dustman "medium" ↔ Immix "medium" — but **our medium uses dedicated blocks** rather than multi-line runs inside shared blocks. A block is flagged `small` or `medium` at acquisition time via `BlockHeader.flags`; sweep branches on the flag (line_map rebuild + recycle push for small, whole-block check for medium).
-- Dustman "huge" ↔ Immix "LOS" (large-object space, externally tracked).
+- Dustman "huge" ↔ Immix "LOS" (large-object space, externally tracked). Each huge object is allocated as its own `std::aligned_alloc`'d region. A `TypeInfo::flags` bit (`flag_huge`) — computed at compile time from `object_bytes<T>()` — tells the mark phase whether to consult the huge side-table (`Heap::huge_records_`) or the normal block-header path. Sweep walks the side table; marked records stay (with their flag cleared for the next cycle), unmarked records have their object destroyed and the region freed.
 
 Classic Immix mixes small and medium within the same block, and reclaims medium via contiguous free-line runs. Dustman separates them onto different block pools. This keeps each allocator's code self-contained at the cost of some memory density (a medium block is always medium even if it has unused line space).
 
