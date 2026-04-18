@@ -10,6 +10,7 @@ FetchContent_MakeAvailable(Catch2)
 add_executable(dustman_tests
   test_smoke.cpp
   test_alloc.cpp
+  test_alloc_stress.cpp
   test_gc_ptr.cpp
   test_tracer.cpp
   test_type_info.cpp

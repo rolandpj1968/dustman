@@ -63,6 +63,14 @@ Run benchmarks directly:
 ./build/benchmarks/dustman_bench
 ```
 
+For stable numbers, use the helper script, which pins to a dedicated set of CPUs and runs with mean/median/stddev aggregation:
+
+```bash
+./benchmarks/run.sh
+```
+
+Override the CPU list with `CPU_LIST=0-5` (the default targets an AMD Ryzen 5 6600H: 3 physical cores + HT siblings, leaving 3 cores free for the rest of the system). Add `GOVERNOR=performance` to set the performance governor for the duration of the run (requires sudo).
+
 Tests use [Catch2 v3](https://github.com/catchorg/Catch2) and benchmarks use [Google Benchmark](https://github.com/google/benchmark); both are fetched automatically via CMake's `FetchContent`.
 
 ## Status
