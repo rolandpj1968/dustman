@@ -1,18 +1,33 @@
 # Collection semantics
 
-This document captures the invariants, state machine, and failure modes of dustman's collection subsystem. It grows with each phase; today it covers phase 2 (stop-the-world mark-sweep, single mutator). Later phases extend rather than replace.
+This document captures the invariants, state machine, and failure modes of dustman's collection subsystem. It grows with each phase; today it covers through phase 3b-ii (stop-the-world mark-sweep with opportunistic evacuation, single mutator). Later phases extend rather than replace.
 
 ## State machine
 
-Three states, driven by `dustman::collect()`:
+Outer states, driven by `dustman::collect()`:
 
 ```
 idle ──collect()──▶ marking ──worklist drained──▶ sweeping ──reclaim done──▶ idle
 ```
 
-Phase 2 is stop-the-world on a single mutator thread: `collect()` runs synchronously and returns with `gc_state == idle`. Phase 2b implemented `idle → marking`; phase 2c added **whole-block sweep** — a block with no mark bits set is reclaimed, destroying every object it contains and returning its memory to the OS. Blocks with any live object are kept entirely; dead objects in partially-live blocks wait for phase 2d's partial-block reuse (planned as the transition to Immix line reclamation in phase 3a).
+The collector runs stop-the-world on a single mutator thread: `collect()` runs synchronously and returns with `gc_state == idle`.
 
-Phase 3a-i (this step) begins the Immix transition: sweep additionally computes a per-block **`line_map`** (one byte per 256-byte line) for kept blocks. A line is flagged live iff it contains any part of a live allocation — header, body, or trailing padding. The allocator does not yet consult the line_map (that lands in 3a-ii).
+**Sweeping** is split into four sub-phases, run back-to-back in a single call:
+
+```
+classify ──▶ evacuate ──▶ update ──▶ finalize
+```
+
+- **classify** walks every block, destroys fully-dead blocks outright, classifies the rest by live-byte fraction against `evacuation_threshold_percent_`. Sparse blocks get the `flag_block_evacuating` bit and are handed off to evacuate; dense blocks have their `line_map` recomputed. The small recycle list is cleared on entry — the load-bearing step that prevents the phase 3b-ii cascade (see [`specs/collect.tla`](../specs/collect.tla)).
+- **evacuate** memcpy's every live object out of each sparse source block into a fresh target, stamps `start` and `mark` on the copy, and writes a forwarding pointer into the source header (low bit of the `TypeInfo*` set to 1).
+- **update** walks roots and reachable objects, rewriting every `gc_ptr<T>` whose pointee is forwarded so it points at the new body. `UpdateVisitor` keeps a `visited_` hash set for cycle-safety without touching mark bits.
+- **finalize** frees the flagged-evacuating source blocks (running destructors only on non-forwarded objects, since forwarded ones are aliases of the live copy) and rebuilds the small recycle list from surviving blocks with any free line.
+
+Per-tier handling inside sweeping:
+
+- **small** (≤ line size): line-aware bump allocation; recycle list pops small blocks with any free line.
+- **medium** (up to `medium_size_limit`): whole-block bump; no recycle participation.
+- **huge** (above `medium_size_limit` or `alignof > alignof(void*)`): side-table managed. Huge objects are never evacuated. Marking and updating of huge records use dedicated `marked` / `updated` flags for cycle-safety.
 
 ## Invariants
 
@@ -24,9 +39,17 @@ Phase 3a-i (this step) begins the Immix transition: sweep additionally computes 
 
 **During `collect()`:** the reentrancy guard (thread-local `collecting_`) is set. `alloc<T>` asserts it is clear and aborts otherwise. `collect()` itself asserts it is clear on entry.
 
-**During `sweeping`:** the current TLAB is retired (cursor and end set to `nullptr`). Fully-dead blocks have their objects destroyed (start_bitmap walk + `TypeInfo::destroy`) and their memory returned to the OS. Kept blocks have their `line_map` rebuilt from the `start_bitmap ∩ mark_bitmap`, extended by the per-object size (via `TypeInfo::size`) so that every line the allocation spans is flagged live.
+**Entering `sweeping`:** both TLABs (small and medium) are retired (cursor and end set to `nullptr`). The small recycle list is cleared on entry to classify — without this, an earlier cycle's recycle leftovers can hand a now-flagged block back to the evacuator as a target.
 
-**After `collect()`:** `gc_state == idle`. The reentrancy guard is cleared. Mark bits reflect the reachability snapshot captured during the cycle; surviving blocks carry a `line_map` consistent with that snapshot.
+**During `classify`:** fully-dead blocks have their objects destroyed (start_bitmap walk + `TypeInfo::destroy`) and their memory returned to the OS. Sparse blocks (live bytes below threshold) are tagged `flag_block_evacuating` and pushed to the evacuation worklist. Dense blocks have their `line_map` rebuilt from the `start_bitmap ∩ mark_bitmap`, extended by per-object size so every line the allocation spans is flagged live.
+
+**During `evacuate`:** for every flagged source block, each live object is copied to a fresh target via `memcpy`; the target is taken from the evacuation TLAB, which bumps into fresh blocks acquired by `alloc_slow_small` / `alloc_slow_medium`. No flagged block is ever selected as a target (TLA+ invariant `NoSelfEvacuation`). The source header is rewritten to a forwarding pointer: a `uintptr_t` whose low bit is 1 and whose remaining bits are the new body address. The source's `start_bitmap` and `mark_bitmap` are left untouched for the update pass.
+
+**During `update`:** all roots and transitively reachable `gc_ptr<T>` fields are visited. Any pointee whose header is forwarded gets rewritten to the new address. `UpdateVisitor` tracks already-visited objects in a local hash set — it does **not** clear mark bits — so the mark-snapshot invariant survives the cycle. Huge records use their own `updated` flag for the same purpose.
+
+**During `finalize`:** blocks tagged `flag_block_evacuating` are freed. Any non-forwarded object in such a block (by construction, an unmarked one that was never live) has its destructor called; forwarded objects are aliases of the surviving copy and are skipped. The small recycle list is rebuilt from surviving blocks that still have any free line.
+
+**After `collect()`:** `gc_state == idle`. The reentrancy guard is cleared. Mark bits reflect the reachability snapshot captured during the cycle; surviving blocks carry a `line_map` consistent with that snapshot. No reachable `gc_ptr<T>` in the heap or in `Root<T>` references a forwarded header.
 
 ## Failure modes and how we catch them
 
@@ -37,8 +60,10 @@ Phase 3a-i (this step) begins the Immix transition: sweep additionally computes 
 | 3 | Reentrant `collect()` | State machine corruption | Same reentrancy guard; aborts on entry. |
 | 4 | Slot arithmetic wrong | Mark bits set for the wrong slot | Round-trip tests: alloc, collect, `is_marked(p)` agrees with expected reachability. |
 | 5 | Cycle in the object graph | Infinite loop during marking | `MarkVisitor` checks the mark bit before queueing; already-marked objects are skipped. |
+| 6 | Recycle list leaks across cycles into evacuation | Evacuator picks a flagged block as its target; `set_start`/`set_mark` on the copy land in the source's bitmaps, which the same `evacuate_block` loop rediscovers — self-iterating cascade of chain-forwarded headers | `classify_and_destroy_dead` clears `small_recycle_` on entry; `finalize_sweep` rebuilds from survivors. Modelled as `RecycleCleanDuringEvac` in [`specs/collect.tla`](../specs/collect.tla) and regression-tested by the `consecutive collects` case in `tests/test_evacuate.cpp`. |
+| 7 | Cycle in the object graph during update | Infinite loop during update | `UpdateVisitor` tracks visited objects in a `std::unordered_set` (does not reuse mark bits, preserving the mark-snapshot invariant). Huge records use their own `updated` flag. |
 
-## Consumer contract (phase 2)
+## Consumer contract
 
 - All GC-managed references outside the heap live in `Root<T>`. A stack-local `gc_ptr<T>` is not a root; its pointee may be collected.
 - Tracers visit every `gc_ptr<T>` field of their type. `FieldList<T, ...>` handles the common case without hand-written bookkeeping.
