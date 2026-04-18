@@ -28,6 +28,7 @@ inline constexpr std::size_t line_body_size = line_size - sizeof(void*);
 inline constexpr std::size_t line_map_bytes = block_size / line_size;
 
 inline constexpr std::size_t medium_size_limit = 4 * 1024;
+inline constexpr std::size_t max_alignment = 4096;
 
 inline constexpr std::uint32_t flag_block_medium = 1u << 0;
 
@@ -125,7 +126,7 @@ inline void* tlab_bump(Tlab& tlab, std::size_t size) noexcept {
 
 void* alloc_slow_small(std::size_t size);
 void* alloc_slow_medium(std::size_t size);
-void* alloc_huge(std::size_t size);
+void* alloc_huge(std::size_t obj_bytes, std::size_t align);
 
 bool mark_huge(const void* body) noexcept;
 void sweep_huge() noexcept;

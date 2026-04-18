@@ -43,8 +43,8 @@ constexpr std::size_t round_up(std::size_t x, std::size_t align) noexcept {
 
 template <typename T>
 constexpr std::size_t object_bytes() noexcept {
-  static_assert(alignof(T) <= alignof(void*),
-                "dustman phase 1: over-aligned types are not yet supported");
+  static_assert(alignof(T) <= max_alignment,
+                "dustman: alignof(T) exceeds max_alignment (see docs/allocation.md)");
   constexpr std::size_t hdr = sizeof(const TypeInfo*);
   constexpr std::size_t total = hdr + sizeof(T);
   return round_up(total, alignof(void*));
@@ -52,7 +52,9 @@ constexpr std::size_t object_bytes() noexcept {
 
 template <typename T>
 constexpr std::uint32_t compute_type_flags() noexcept {
-  return (object_bytes<T>() > medium_size_limit) ? flag_huge : 0;
+  const bool is_big = object_bytes<T>() > medium_size_limit;
+  const bool is_wide = alignof(T) > alignof(void*);
+  return (is_big || is_wide) ? flag_huge : 0;
 }
 
 } // namespace detail

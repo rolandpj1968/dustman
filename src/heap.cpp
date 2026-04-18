@@ -44,6 +44,7 @@ bool block_has_any_free_line(const BlockHeader* h) noexcept {
 
 struct HugeRecord {
   void* base;
+  void* hdr;
   std::size_t bytes;
   bool marked;
 };
@@ -68,23 +69,35 @@ public:
     return block;
   }
 
-  void* acquire_huge(std::size_t bytes) {
+  void* acquire_huge(std::size_t obj_bytes, std::size_t align) {
+    const std::size_t alloc_align = (align > alignof(void*)) ? align : alignof(void*);
+    std::size_t hdr_offset = 0;
+    std::size_t alloc_size;
+    if (align > alignof(void*)) {
+      std::size_t body_size = obj_bytes - sizeof(const TypeInfo*);
+      body_size = (body_size + align - 1) & ~(align - 1);
+      alloc_size = align + body_size;
+      hdr_offset = align - sizeof(const TypeInfo*);
+    } else {
+      alloc_size = (obj_bytes + alloc_align - 1) & ~(alloc_align - 1);
+    }
+
     std::lock_guard<std::mutex> lock(mu_);
-    void* base = std::aligned_alloc(alignof(void*), bytes);
+    void* base = std::aligned_alloc(alloc_align, alloc_size);
     if (base == nullptr) {
       fatal_oom();
     }
-    huge_records_.push_back(HugeRecord {base, bytes, false});
-    return base;
+    void* hdr = static_cast<std::byte*>(base) + hdr_offset;
+    huge_records_.push_back(HugeRecord {base, hdr, alloc_size, false});
+    return hdr;
   }
 
   bool mark_huge(const void* body) noexcept {
-    auto* base = reinterpret_cast<const std::byte*>(body) - sizeof(const TypeInfo*);
+    auto* hdr_ptr = reinterpret_cast<const std::byte*>(body) - sizeof(const TypeInfo*);
     std::lock_guard<std::mutex> lock(mu_);
     for (auto& rec : huge_records_) {
-      if (rec.base == base) {
-        if (rec.marked)
-          return false;
+      if (rec.hdr == hdr_ptr) {
+        if (rec.marked) return false;
         rec.marked = true;
         return true;
       }
@@ -96,7 +109,7 @@ public:
     std::lock_guard<std::mutex> lock(mu_);
     auto new_end = std::remove_if(huge_records_.begin(), huge_records_.end(), [](HugeRecord& rec) {
       if (!rec.marked) {
-        void* body = static_cast<std::byte*>(rec.base) + sizeof(const TypeInfo*);
+        void* body = static_cast<std::byte*>(rec.hdr) + sizeof(const TypeInfo*);
         const TypeInfo* ti = type_of(body);
         ti->destroy(body);
         std::free(rec.base);
@@ -277,8 +290,8 @@ void* alloc_slow_medium(std::size_t size) {
   return alloc_fresh_medium_block(size);
 }
 
-void* alloc_huge(std::size_t size) {
-  return Heap::instance().acquire_huge(size);
+void* alloc_huge(std::size_t obj_bytes, std::size_t align) {
+  return Heap::instance().acquire_huge(obj_bytes, align);
 }
 
 bool mark_huge(const void* body) noexcept {

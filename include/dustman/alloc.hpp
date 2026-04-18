@@ -17,23 +17,24 @@ gc_ptr<T> alloc(Args&&... args) {
   }
 
   constexpr std::size_t size = detail::object_bytes<T>();
+  constexpr std::uint32_t flags = detail::compute_type_flags<T>();
 
   void* hdr;
-  if constexpr (size <= detail::line_size) {
+  if constexpr ((flags & flag_huge) != 0) {
+    hdr = detail::alloc_huge(size, alignof(T));
+  } else if constexpr (size <= detail::line_size) {
     hdr = detail::tlab_bump(detail::small_tlab, size);
     if (hdr == nullptr)
       hdr = detail::alloc_slow_small(size);
-  } else if constexpr (size <= detail::medium_size_limit) {
+  } else {
     hdr = detail::tlab_bump(detail::medium_tlab, size);
     if (hdr == nullptr)
       hdr = detail::alloc_slow_medium(size);
-  } else {
-    hdr = detail::alloc_huge(size);
   }
 
   *static_cast<const TypeInfo**>(hdr) = &TypeInfoFor<T>::value;
   void* body = static_cast<std::byte*>(hdr) + sizeof(const TypeInfo*);
-  if constexpr (size <= detail::medium_size_limit) {
+  if constexpr ((flags & flag_huge) == 0) {
     detail::set_start(body);
   }
   T* obj = new (body) T(std::forward<Args>(args)...);

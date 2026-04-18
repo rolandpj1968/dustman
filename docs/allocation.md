@@ -63,7 +63,21 @@ Dustman's tiers are Immix's tiers, with one deliberate simplification:
 
 - Dustman "small" ↔ Immix "small" (bump within line).
 - Dustman "medium" ↔ Immix "medium" — but **our medium uses dedicated blocks** rather than multi-line runs inside shared blocks. A block is flagged `small` or `medium` at acquisition time via `BlockHeader.flags`; sweep branches on the flag (line_map rebuild + recycle push for small, whole-block check for medium).
-- Dustman "huge" ↔ Immix "LOS" (large-object space, externally tracked). Each huge object is allocated as its own `std::aligned_alloc`'d region. A `TypeInfo::flags` bit (`flag_huge`) — computed at compile time from `object_bytes<T>()` — tells the mark phase whether to consult the huge side-table (`Heap::huge_records_`) or the normal block-header path. Sweep walks the side table; marked records stay (with their flag cleared for the next cycle), unmarked records have their object destroyed and the region freed.
+- Dustman "huge" ↔ Immix "LOS" (large-object space, externally tracked). Each huge object is allocated as its own `std::aligned_alloc`'d region. A `TypeInfo::flags` bit (`flag_huge`) — computed at compile time — tells the mark phase whether to consult the huge side-table (`Heap::huge_records_`) or the normal block-header path. Sweep walks the side table; marked records stay (with their flag cleared for the next cycle), unmarked records have their object destroyed and the region freed.
+
+## Over-aligned types go to the huge tier
+
+A type is routed to the huge tier if **either** `object_bytes<T>() > medium_size_limit` **or** `alignof(T) > alignof(void*)` (> 8 B on 64-bit). This means an `alignas(16) struct { int x; };` — tiny but over-aligned — allocates via `aligned_alloc` on every call rather than through the small/medium TLAB.
+
+Why the blanket rule:
+
+- The small/medium fast path assumes `body = cursor + sizeof(TypeInfo*)` is adequately aligned. Supporting `alignof(T) > alignof(void*)` in that path means per-allocation cursor realignment plus padded headers — the kind of complexity that compounds across every path. Banishing it to huge keeps small and medium pristine.
+- The huge tier is already `aligned_alloc`-based; giving it an alignment parameter is a one-line change. For over-aligned types the huge allocator adds a prefix pad so the body lands on an `alignof(T)` boundary.
+- In practice, over-aligned types are rare (SIMD types, `alignas(cache_line)` structs for false-sharing avoidance, custom atomic layouts). If a consumer's hot path is allocating millions of over-aligned tiny types, the huge-tier cost will surface it and we can revisit.
+
+**Known limitation:** `alignof(T) ≤ max_alignment` (4 KiB). Beyond that, `aligned_alloc` implementations on most systems refuse, and we abort at compile time.
+
+**Known performance pitfall:** `alignas(16) struct Small { int x; };` is a tiny but over-aligned type. It will allocate via `aligned_alloc` per instance and spend linear time in the huge mark path. If you see this in a hot loop, either drop the `alignas` (if it was cargo-culted) or tell us — the fast path can grow a per-alignment lane if it becomes worthwhile.
 
 Classic Immix mixes small and medium within the same block, and reclaims medium via contiguous free-line runs. Dustman separates them onto different block pools. This keeps each allocator's code self-contained at the cost of some memory density (a medium block is always medium even if it has unused line space).
 

@@ -111,3 +111,54 @@ TEST_CASE("huge_count reflects live huge objects after a collect cycle", "[huge]
   dustman::collect();
   REQUIRE(dustman::detail::huge_count() == 0);
 }
+
+namespace {
+int wide_destroyed = 0;
+struct alignas(16) WideSmall {
+  int x = 0;
+  int y = 0;
+  WideSmall() noexcept = default;
+  explicit WideSmall(int xx, int yy) noexcept : x(xx), y(yy) {}
+  ~WideSmall() noexcept { ++wide_destroyed; }
+};
+struct alignas(64) WideCacheLine {
+  int payload = 0;
+  ~WideCacheLine() noexcept = default;
+};
+} // namespace
+
+template <>
+struct dustman::Tracer<WideSmall> : dustman::FieldList<WideSmall> {};
+
+template <>
+struct dustman::Tracer<WideCacheLine> : dustman::FieldList<WideCacheLine> {};
+
+TEST_CASE("over-aligned small types carry flag_huge", "[huge]") {
+  STATIC_REQUIRE(sizeof(WideSmall) <= dustman::detail::line_body_size);
+  STATIC_REQUIRE(alignof(WideSmall) > alignof(void*));
+  STATIC_REQUIRE((dustman::TypeInfoFor<WideSmall>::value.flags & dustman::flag_huge) != 0);
+}
+
+TEST_CASE("over-aligned allocation honours alignof(T)", "[huge]") {
+  auto p = dustman::alloc<WideSmall>(11, 22);
+  REQUIRE(p.get() != nullptr);
+  REQUIRE(p->x == 11);
+  REQUIRE(p->y == 22);
+  auto addr = reinterpret_cast<std::uintptr_t>(p.get());
+  REQUIRE((addr % alignof(WideSmall)) == 0);
+}
+
+TEST_CASE("cache-line-aligned type allocates on a 64-byte boundary", "[huge]") {
+  auto p = dustman::alloc<WideCacheLine>();
+  auto addr = reinterpret_cast<std::uintptr_t>(p.get());
+  REQUIRE((addr % alignof(WideCacheLine)) == 0);
+}
+
+TEST_CASE("over-aligned objects are destroyed by sweep when unreachable", "[huge]") {
+  const int before = wide_destroyed;
+  for (int i = 0; i < 5; ++i) {
+    (void)dustman::alloc<WideSmall>(i, -i);
+  }
+  dustman::collect();
+  REQUIRE(wide_destroyed - before == 5);
+}
