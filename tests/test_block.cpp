@@ -20,19 +20,24 @@ struct Small {
 template <>
 struct dustman::Tracer<Small> : dustman::FieldList<Small> {};
 
-TEST_CASE("BlockHeader is cache-aligned and its size is a multiple of the alignment", "[block]") {
-  STATIC_REQUIRE(alignof(dustman::detail::BlockHeader) == 64);
-  STATIC_REQUIRE(sizeof(dustman::detail::BlockHeader) % 64 == 0);
+TEST_CASE("BlockHeader is 128-aligned and sized for line-aligned body", "[block]") {
+  STATIC_REQUIRE(alignof(dustman::detail::BlockHeader) == 128);
+  STATIC_REQUIRE(sizeof(dustman::detail::BlockHeader) % 128 == 0);
+  STATIC_REQUIRE(dustman::detail::block_header_size % dustman::detail::line_size == 0);
 }
 
 TEST_CASE("block geometry is self-consistent", "[block]") {
   STATIC_REQUIRE(dustman::detail::block_size == 32 * 1024);
   STATIC_REQUIRE(dustman::detail::block_alignment == dustman::detail::block_size);
   STATIC_REQUIRE(dustman::detail::slot_bytes == alignof(void*));
+  STATIC_REQUIRE(dustman::detail::line_size == 128);
   STATIC_REQUIRE(dustman::detail::block_body_size ==
                  dustman::detail::block_size - dustman::detail::block_header_size);
   STATIC_REQUIRE(dustman::detail::bitmap_bytes * 8 * dustman::detail::slot_bytes >=
                  dustman::detail::block_size);
+  STATIC_REQUIRE(dustman::detail::line_map_bytes >= dustman::detail::lines_per_block);
+  STATIC_REQUIRE(dustman::detail::lines_per_block * dustman::detail::line_size <=
+                 dustman::detail::block_body_size);
 }
 
 TEST_CASE("header_of() returns the 32 KiB-aligned base of the containing block", "[block]") {

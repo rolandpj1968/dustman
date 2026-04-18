@@ -99,6 +99,42 @@ void destroy_all_objects_in(BlockHeader* h) noexcept {
   }
 }
 
+void compute_line_map(BlockHeader* h) noexcept {
+  h->line_map.fill(0);
+
+  auto* block_base = reinterpret_cast<std::byte*>(h);
+  auto* body_start = block_base + block_header_size;
+
+  for (std::size_t slot = 0; slot < max_slots_per_block; ++slot) {
+    std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+    bool start_bit = (h->start_bitmap[slot / 8] & mask) != 0;
+    if (!start_bit)
+      continue;
+    bool mark_bit = (h->mark_bitmap[slot / 8] & mask) != 0;
+    if (!mark_bit)
+      continue;
+
+    auto* body_addr = body_start + slot * slot_bytes;
+    const TypeInfo* ti = type_of(body_addr);
+
+    std::size_t alloc_bytes = sizeof(const TypeInfo*) + ti->size;
+    alloc_bytes = (alloc_bytes + slot_bytes - 1) & ~(slot_bytes - 1);
+
+    std::size_t header_offset = (slot - 1) * slot_bytes;
+    std::size_t alloc_end_offset = header_offset + alloc_bytes;
+
+    std::size_t first_line = header_offset / line_size;
+    std::size_t last_line = (alloc_end_offset - 1) / line_size;
+    if (last_line >= lines_per_block) {
+      last_line = lines_per_block - 1;
+    }
+
+    for (std::size_t line = first_line; line <= last_line; ++line) {
+      h->line_map[line] = 1;
+    }
+  }
+}
+
 } // namespace
 
 void* alloc_slow(std::size_t size) {
@@ -119,10 +155,12 @@ void clear_all_marks() noexcept {
 
 void sweep_all_blocks() noexcept {
   Heap::instance().remove_blocks_if([](BlockHeader* h) {
-    if (block_has_any_mark(h))
-      return false;
-    destroy_all_objects_in(h);
-    return true;
+    if (!block_has_any_mark(h)) {
+      destroy_all_objects_in(h);
+      return true;
+    }
+    compute_line_map(h);
+    return false;
   });
 }
 

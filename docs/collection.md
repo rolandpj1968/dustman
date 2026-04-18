@@ -10,7 +10,9 @@ Three states, driven by `dustman::collect()`:
 idle ──collect()──▶ marking ──worklist drained──▶ sweeping ──reclaim done──▶ idle
 ```
 
-Phase 2 is stop-the-world on a single mutator thread: `collect()` runs synchronously and returns with `gc_state == idle`. Phase 2b implemented `idle → marking`; phase 2c (this step) adds **whole-block sweep** — a block with no mark bits set is reclaimed, destroying every object it contains and returning its memory to the OS. Blocks with any live object are kept entirely (dead objects in partially-live blocks wait for phase 2d's partial-block reuse).
+Phase 2 is stop-the-world on a single mutator thread: `collect()` runs synchronously and returns with `gc_state == idle`. Phase 2b implemented `idle → marking`; phase 2c added **whole-block sweep** — a block with no mark bits set is reclaimed, destroying every object it contains and returning its memory to the OS. Blocks with any live object are kept entirely; dead objects in partially-live blocks wait for phase 2d's partial-block reuse (planned as the transition to Immix line reclamation in phase 3a).
+
+Phase 3a-i (this step) begins the Immix transition: sweep additionally computes a per-block **`line_map`** (one byte per 128-byte line) for kept blocks. A line is flagged live iff it contains any part of a live allocation — header, body, or trailing padding. The allocator does not yet consult the line_map (that lands in 3a-ii).
 
 ## Invariants
 
@@ -22,7 +24,9 @@ Phase 2 is stop-the-world on a single mutator thread: `collect()` runs synchrono
 
 **During `collect()`:** the reentrancy guard (thread-local `collecting_`) is set. `alloc<T>` asserts it is clear and aborts otherwise. `collect()` itself asserts it is clear on entry.
 
-**After `collect()`:** `gc_state == idle`. The reentrancy guard is cleared. Mark bits reflect the reachability snapshot captured during the cycle.
+**During `sweeping`:** the current TLAB is retired (cursor and end set to `nullptr`). Fully-dead blocks have their objects destroyed (start_bitmap walk + `TypeInfo::destroy`) and their memory returned to the OS. Kept blocks have their `line_map` rebuilt from the `start_bitmap ∩ mark_bitmap`, extended by the per-object size (via `TypeInfo::size`) so that every line the allocation spans is flagged live.
+
+**After `collect()`:** `gc_state == idle`. The reentrancy guard is cleared. Mark bits reflect the reachability snapshot captured during the cycle; surviving blocks carry a `line_map` consistent with that snapshot.
 
 ## Failure modes and how we catch them
 

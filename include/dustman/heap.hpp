@@ -23,6 +23,9 @@ inline constexpr std::size_t slot_bytes = alignof(void*);
 inline constexpr std::size_t max_slots_per_block = block_size / slot_bytes;
 inline constexpr std::size_t bitmap_bytes = (max_slots_per_block + 7) / 8;
 
+inline constexpr std::size_t line_size = 128;
+inline constexpr std::size_t line_map_bytes = block_size / line_size;
+
 enum class GcState : std::uint8_t {
   idle,
   marking,
@@ -31,15 +34,17 @@ enum class GcState : std::uint8_t {
 
 inline GcState gc_state = GcState::idle;
 
-struct alignas(64) BlockHeader {
+struct alignas(128) BlockHeader {
   std::uint32_t flags = 0;
   std::uint32_t live_count = 0;
   std::array<std::uint8_t, bitmap_bytes> mark_bitmap {};
   std::array<std::uint8_t, bitmap_bytes> start_bitmap {};
+  std::array<std::uint8_t, line_map_bytes> line_map {};
 };
 
 inline constexpr std::size_t block_header_size = sizeof(BlockHeader);
 inline constexpr std::size_t block_body_size = block_size - block_header_size;
+inline constexpr std::size_t lines_per_block = block_body_size / line_size;
 
 inline BlockHeader* header_of(const void* p) noexcept {
   auto addr = reinterpret_cast<std::uintptr_t>(p);
@@ -52,6 +57,13 @@ inline std::size_t slot_index(const void* p) noexcept {
   auto base = addr & ~(block_alignment - 1);
   auto body = base + block_header_size;
   return (addr - body) / slot_bytes;
+}
+
+inline std::size_t line_of(const void* p) noexcept {
+  auto addr = reinterpret_cast<std::uintptr_t>(p);
+  auto base = addr & ~(block_alignment - 1);
+  auto body = base + block_header_size;
+  return (addr - body) / line_size;
 }
 
 inline bool is_marked(const void* obj) noexcept {

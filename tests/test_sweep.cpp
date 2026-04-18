@@ -78,6 +78,21 @@ TEST_CASE("allocation works after collect", "[sweep]") {
   REQUIRE(p->v == 7);
 }
 
+TEST_CASE("sweep populates line_map for kept blocks", "[sweep]") {
+  dustman::Root<Survivor> r1 {dustman::alloc<Survivor>(1)};
+  dustman::Root<Survivor> r2 {dustman::alloc<Survivor>(2)};
+
+  dustman::collect();
+
+  auto* h1 = dustman::detail::header_of(r1.get());
+  auto* h2 = dustman::detail::header_of(r2.get());
+  std::size_t l1 = dustman::detail::line_of(r1.get());
+  std::size_t l2 = dustman::detail::line_of(r2.get());
+
+  REQUIRE(h1->line_map[l1] != 0);
+  REQUIRE(h2->line_map[l2] != 0);
+}
+
 TEST_CASE("a rooted object survives many alloc-and-collect cycles", "[sweep]") {
   dustman::Root<Survivor> r {dustman::alloc<Survivor>(99)};
 
