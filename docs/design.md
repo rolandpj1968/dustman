@@ -264,7 +264,7 @@ The following hooks are built into dustman's core, not retrofitted into a separa
 4. **Fuzz** — distinct from property-based. Coverage-guided mutation of API call sequences (allocate, assign, safepoint, trigger-GC, ...) via **libFuzzer**, with **libprotobuf-mutator** providing a structured grammar so mutations stay decodable. Reaches states no human would script. A specific sub-mode fuzzes *tracers themselves* — generates correct and deliberately-buggy tracers and asserts that stress mode + heap verifier detect the bad ones, testing the testing infrastructure.
 5. **Stress / torture** — long-running, high allocation pressure, many GC cycles. Exercises TLAB refill, block recycling, evacuation, remembered set maintenance under load.
 6. **Sanitisers** — AddressSanitizer and UndefinedBehaviorSanitizer throughout. ThreadSanitizer added once concurrent marking lands.
-7. **Benchmarks** — allocation throughput, GC pause time, heap overhead. Tracked as a separate gate; not correctness tests, but essential for catching performance regressions.
+7. **Benchmarks** — allocation throughput, GC pause time, heap overhead. Tracked as a separate gate; not correctness tests, but essential for catching performance regressions. Each collection phase captures a baseline on landing (throughput + cache-miss rate) so later layout or algorithm changes have real numbers to justify themselves against.
 
 Both positive and negative tests are written for every feature: the former verifies *the GC collects what it should*, the latter verifies *the GC does not collect what it should not*.
 
