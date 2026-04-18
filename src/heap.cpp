@@ -4,9 +4,15 @@
 #include <mutex>
 #include <vector>
 
+#include "dustman/gc_ptr.hpp"
+#include "dustman/visitor.hpp"
+
 namespace dustman::detail {
 
 thread_local Tlab current_tlab;
+
+thread_local std::vector<gc_ptr_base*> root_slots_;
+thread_local std::vector<std::size_t> root_free_;
 
 [[noreturn]] void fatal_oom() noexcept {
   std::abort();
@@ -44,6 +50,35 @@ void* alloc_slow(std::size_t size) {
   tlab.cursor = block + size;
   tlab.end = block + block_size;
   return block;
+}
+
+std::size_t register_root_slot(gc_ptr_base* p) noexcept {
+  if (!root_free_.empty()) {
+    std::size_t slot = root_free_.back();
+    root_free_.pop_back();
+    root_slots_[slot] = p;
+    return slot;
+  }
+  std::size_t slot = root_slots_.size();
+  root_slots_.push_back(p);
+  return slot;
+}
+
+void unregister_root_slot(std::size_t slot) noexcept {
+  root_slots_[slot] = nullptr;
+  root_free_.push_back(slot);
+}
+
+void update_root_slot(std::size_t slot, gc_ptr_base* p) noexcept {
+  root_slots_[slot] = p;
+}
+
+void visit_roots(Visitor& v) noexcept {
+  for (gc_ptr_base* entry : root_slots_) {
+    if (entry != nullptr) {
+      v.visit(*entry);
+    }
+  }
 }
 
 } // namespace dustman::detail

@@ -12,6 +12,7 @@ add_executable(dustman_tests
   test_alloc.cpp
   test_alloc_stress.cpp
   test_gc_ptr.cpp
+  test_root.cpp
   test_tracer.cpp
   test_type_info.cpp
 )

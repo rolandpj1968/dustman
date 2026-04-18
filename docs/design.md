@@ -136,6 +136,29 @@ struct TypeInfo {
 
 This is the "manual vtable" that non-virtual designs require in any case. It gives the collector what it needs to mark, evacuate, and finalise any object from a raw pointer alone, independent of whether the type uses inheritance.
 
+### 5. `Root<T>` for externally-held references
+
+Precise collection needs to know every live reference — every word that could currently be holding a GC-managed pointer and keeping an object alive. References stored inside GC-managed objects are found by tracing (via `Tracer<T>`). References held outside the heap — on the stack, in globals, in static storage, in host-owned containers — must be registered explicitly.
+
+Dustman's mechanism is a smart-pointer template, `Root<T>`, that registers itself in a thread-local root list at construction and unregisters at destruction. The root list is a vector of pointers to `gc_ptr_base` sub-objects; the collector walks it during marking.
+
+```cpp
+dustman::Root<MyObj> r = dustman::alloc<MyObj>(args);   // registered, non-null
+dustman::gc_ptr<MyObj> p = r;                            // implicit slice; no registration
+parent->child = r;                                       // assigns to a field via gc_ptr<T>
+```
+
+`Root<T>` composes a `gc_ptr<T>` as its payload and a `std::size_t` slot index into the thread-local root vector. Move is supported via a handle-based protocol: on move, the destination takes over the slot, and the vector entry is updated to point at the destination's payload. This keeps `Root<T>` usable as a function return, a `std::vector` element, or any other movable context while guaranteeing the collector always finds a live address in every occupied slot.
+
+Key properties:
+
+- **`alloc<T>()` keeps returning `gc_ptr<T>`.** The consumer decides when to wrap in a `Root<T>`. Field-assignment paths (`parent->child = alloc<T>(...)`) pay zero root-registration cost.
+- **Implicit conversion `Root<T> → gc_ptr<T>`.** `parent->child = root;` works without ceremony.
+- **Copy is deleted, move is cheap.** A `Root<T>` is a unique registration; duplicating it would mean duplicating slot ownership.
+- **Free-list slot reuse.** The root vector grows monotonically to the historical peak; destroyed roots leave `nullptr` entries that the collector skips and subsequent `Root` constructions re-occupy.
+
+In later phases (incremental and concurrent collection), allocation will act as an implicit safepoint — the contract between `alloc<T>()` returning a `gc_ptr<T>` and the consumer wrapping it in a `Root<T>` needs to be tightened so that the brief intermediate value cannot be collected. That is a contract change, not an API change; `Root<T>`'s shape and the `alloc<T>()` return type do not move.
+
 ## Inheritance-optional rationale
 
 A general-purpose GC library that cannot manage types the consumer doesn't own is a weaker proposition. Forcing `: public dustman::Object` locks out third-party types and makes dustman unsuitable for anything but green-field code.

@@ -6,6 +6,7 @@
 
 #include "dustman/alloc.hpp"
 #include "dustman/gc_ptr.hpp"
+#include "dustman/root.hpp"
 #include "dustman/tracer.hpp"
 #include "dustman/type_info.hpp"
 #include "dustman/visitor.hpp"
