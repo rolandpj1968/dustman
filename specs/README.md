@@ -9,6 +9,11 @@ Formal specs of dustman's state machines, maintained alongside the code.
   no self-evacuation). Catches the class of invariant-violation bug hit in
   phase 3b-ii.
 - **`collect.cfg`** — TLC configuration for `collect.tla`.
+- **`stw.tla`** — phase 3.5 safepoint protocol. Models mutator threads
+  polling a pause flag and parking, and a collector that enters its
+  sweep only once every mutator is parked. Invariants:
+  `NoRunningDuringCollect` and `PauseFlagCoherent`.
+- **`stw.cfg`** — TLC configuration for `stw.tla` (three mutator threads).
 
 ## Running
 
@@ -39,6 +44,13 @@ counterexample in under a second: a sequence of states where the recycle
 list survives into the evacuation phase, `EvacuateSource` pops a
 flagged-for-evacuation block out of it, and `NoSelfEvacuation` is
 violated.
+
+### Sanity-checking the STW spec
+
+Edit `stw.tla`, replace `CollectorBeginCollect`'s `AllParked` guard with
+`TRUE`. Rerun TLC. It produces a three-state counterexample where the
+collector enters "collecting" while every mutator is still running,
+violating `NoRunningDuringCollect`.
 
 ## When to write a new spec
 
