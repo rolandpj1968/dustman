@@ -36,6 +36,10 @@ Implementation follows a pragmatic migration path, but design is the hard part �
 3. **Immix** — line/block reclamation, opportunistic evacuation, generational nursery/tenured split.
 4. **Incremental / concurrent marking** — reduce pause time independent of heap size.
 
+## Design
+
+See [docs/design.md](docs/design.md) for architecture, the precise-tracing contract, API direction, and rationale.
+
 ## Status
 
 Early design phase. API, visitor mechanism, and core data structures are under active discussion.
