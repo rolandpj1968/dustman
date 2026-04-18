@@ -15,6 +15,7 @@ add_executable(dustman_tests
   test_collect.cpp
   test_gc_ptr.cpp
   test_root.cpp
+  test_sweep.cpp
   test_tracer.cpp
   test_type_info.cpp
 )

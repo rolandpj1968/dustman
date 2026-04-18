@@ -60,7 +60,11 @@ void collect() noexcept {
   mv.drain();
 
   detail::gc_state = detail::GcState::sweeping;
-  // Sweep lands in step 2c; for now, collect() exits after marking.
+
+  detail::current_tlab.cursor = nullptr;
+  detail::current_tlab.end = nullptr;
+
+  detail::sweep_all_blocks();
 
   detail::gc_state = detail::GcState::idle;
   detail::collecting_ = false;

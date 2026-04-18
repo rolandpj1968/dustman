@@ -10,7 +10,7 @@ Three states, driven by `dustman::collect()`:
 idle ──collect()──▶ marking ──worklist drained──▶ sweeping ──reclaim done──▶ idle
 ```
 
-Phase 2 is stop-the-world on a single mutator thread: `collect()` runs synchronously and returns with `gc_state == idle`. Phase 2b (this step) implements the transition `idle → marking → idle` — the sweep phase is a no-op for now and lands in phase 2c.
+Phase 2 is stop-the-world on a single mutator thread: `collect()` runs synchronously and returns with `gc_state == idle`. Phase 2b implemented `idle → marking`; phase 2c (this step) adds **whole-block sweep** — a block with no mark bits set is reclaimed, destroying every object it contains and returning its memory to the OS. Blocks with any live object are kept entirely (dead objects in partially-live blocks wait for phase 2d's partial-block reuse).
 
 ## Invariants
 
@@ -40,5 +40,6 @@ Phase 2 is stop-the-world on a single mutator thread: `collect()` runs synchrono
 - Tracers visit every `gc_ptr<T>` field of their type. `FieldList<T, ...>` handles the common case without hand-written bookkeeping.
 - Tracers must not allocate.
 - `collect()` must not be called from within another `collect()` or from a tracer.
+- **Destructors of GC-managed types must not read from or dereference other GC-managed objects.** When the sweep phase destroys a fully-dead block, the order in which it destroys objects is unspecified, and any object a destructor might touch may itself already be destroyed. Destructors should free only non-GC resources; for most types with only `gc_ptr<T>` fields the compiler-generated destructor is already correct (it is trivial; it does not dereference).
 
 Runtime-detectable violations of this contract abort.

@@ -94,6 +94,8 @@ extern thread_local bool collecting_;
 void* alloc_slow(std::size_t size);
 
 void clear_all_marks() noexcept;
+void sweep_all_blocks() noexcept;
+std::size_t heap_block_count() noexcept;
 
 [[noreturn]] void fatal_oom() noexcept;
 [[noreturn]] void fatal_reentrant_collect() noexcept;

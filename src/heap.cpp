@@ -1,11 +1,13 @@
 #include "dustman/heap.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <mutex>
 #include <new>
 #include <vector>
 
 #include "dustman/gc_ptr.hpp"
+#include "dustman/type_info.hpp"
 #include "dustman/visitor.hpp"
 
 namespace dustman::detail {
@@ -50,10 +52,52 @@ public:
     }
   }
 
+  template <typename Pred>
+  void remove_blocks_if(Pred&& pred) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto new_end = std::remove_if(blocks_.begin(), blocks_.end(), [&pred](void* block) {
+      auto* h = static_cast<BlockHeader*>(block);
+      if (pred(h)) {
+        std::free(block);
+        return true;
+      }
+      return false;
+    });
+    blocks_.erase(new_end, blocks_.end());
+  }
+
+  std::size_t size() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return blocks_.size();
+  }
+
 private:
   std::mutex mu_;
   std::vector<void*> blocks_;
 };
+
+bool block_has_any_mark(BlockHeader* h) noexcept {
+  for (std::uint8_t byte : h->mark_bitmap) {
+    if (byte != 0)
+      return true;
+  }
+  return false;
+}
+
+void destroy_all_objects_in(BlockHeader* h) noexcept {
+  auto* block_base = reinterpret_cast<std::byte*>(h);
+  auto* body_start = block_base + block_header_size;
+
+  for (std::size_t slot = 0; slot < max_slots_per_block; ++slot) {
+    std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+    if ((h->start_bitmap[slot / 8] & mask) == 0)
+      continue;
+
+    auto* body_addr = body_start + slot * slot_bytes;
+    const TypeInfo* ti = type_of(body_addr);
+    ti->destroy(body_addr);
+  }
+}
 
 } // namespace
 
@@ -71,6 +115,19 @@ void* alloc_slow(std::size_t size) {
 
 void clear_all_marks() noexcept {
   Heap::instance().for_each_block([](BlockHeader* h) { h->mark_bitmap.fill(0); });
+}
+
+void sweep_all_blocks() noexcept {
+  Heap::instance().remove_blocks_if([](BlockHeader* h) {
+    if (block_has_any_mark(h))
+      return false;
+    destroy_all_objects_in(h);
+    return true;
+  });
+}
+
+std::size_t heap_block_count() noexcept {
+  return Heap::instance().size();
 }
 
 std::size_t register_root_slot(gc_ptr_base* p) noexcept {

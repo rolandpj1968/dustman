@@ -69,15 +69,13 @@ TEST_CASE("allocated object carries its TypeInfo in the header", "[alloc]") {
   REQUIRE(ti->align == alignof(Small));
 }
 
-TEST_CASE("TypeInfo.destroy invokes the allocated object's destructor", "[alloc]") {
-  destroyed_count = 0;
+TEST_CASE("type_of on an allocated object returns the registered TypeInfo", "[alloc]") {
   auto p = dustman::alloc<Destructible>(42);
   REQUIRE(p->tag == 42);
 
   const dustman::TypeInfo* ti = dustman::type_of(p.get());
-  ti->destroy(p.get());
-
-  REQUIRE(destroyed_count == 1);
+  REQUIRE(ti == &dustman::TypeInfoFor<Destructible>::value);
+  REQUIRE(ti->destroy != nullptr);
 }
 
 TEST_CASE("allocations span multiple blocks under load", "[alloc]") {

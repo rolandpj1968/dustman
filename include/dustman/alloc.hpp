@@ -58,11 +58,4 @@ gc_ptr<T> alloc(Args&&... args) {
   return gc_ptr<T> {obj};
 }
 
-template <typename T>
-const TypeInfo* type_of(const T* obj) noexcept {
-  auto* bytes = reinterpret_cast<const std::byte*>(obj);
-  auto* hdr = reinterpret_cast<const TypeInfo* const*>(bytes - sizeof(const TypeInfo*));
-  return *hdr;
-}
-
 } // namespace dustman

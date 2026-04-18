@@ -46,4 +46,10 @@ struct TypeInfoFor {
   };
 };
 
+inline const TypeInfo* type_of(const void* obj) noexcept {
+  auto* bytes = reinterpret_cast<const std::byte*>(obj);
+  auto* hdr = reinterpret_cast<const TypeInfo* const*>(bytes - sizeof(const TypeInfo*));
+  return *hdr;
+}
+
 } // namespace dustman
