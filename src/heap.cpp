@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <mutex>
+#include <new>
 #include <vector>
 
 #include "dustman/gc_ptr.hpp"
@@ -46,10 +47,14 @@ private:
 
 void* alloc_slow(std::size_t size) {
   auto* block = static_cast<std::byte*>(Heap::instance().acquire_block());
+  new (block) BlockHeader {};
+
+  auto* body = block + block_header_size;
+
   Tlab& tlab = current_tlab;
-  tlab.cursor = block + size;
+  tlab.cursor = body + size;
   tlab.end = block + block_size;
-  return block;
+  return body;
 }
 
 std::size_t register_root_slot(gc_ptr_base* p) noexcept {

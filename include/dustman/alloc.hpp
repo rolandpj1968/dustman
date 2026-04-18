@@ -28,7 +28,7 @@ constexpr std::size_t object_bytes() noexcept {
 template <typename T>
 inline void* alloc_raw() {
   constexpr std::size_t size = object_bytes<T>();
-  static_assert(size <= block_size, "dustman: allocation too large for a single block");
+  static_assert(size <= block_body_size, "dustman: allocation too large for a single block");
 
   Tlab& tlab = current_tlab;
   std::byte* cursor = tlab.cursor;
