@@ -12,7 +12,7 @@ idle ──collect()──▶ marking ──worklist drained──▶ sweeping �
 
 Phase 2 is stop-the-world on a single mutator thread: `collect()` runs synchronously and returns with `gc_state == idle`. Phase 2b implemented `idle → marking`; phase 2c added **whole-block sweep** — a block with no mark bits set is reclaimed, destroying every object it contains and returning its memory to the OS. Blocks with any live object are kept entirely; dead objects in partially-live blocks wait for phase 2d's partial-block reuse (planned as the transition to Immix line reclamation in phase 3a).
 
-Phase 3a-i (this step) begins the Immix transition: sweep additionally computes a per-block **`line_map`** (one byte per 128-byte line) for kept blocks. A line is flagged live iff it contains any part of a live allocation — header, body, or trailing padding. The allocator does not yet consult the line_map (that lands in 3a-ii).
+Phase 3a-i (this step) begins the Immix transition: sweep additionally computes a per-block **`line_map`** (one byte per 256-byte line) for kept blocks. A line is flagged live iff it contains any part of a live allocation — header, body, or trailing padding. The allocator does not yet consult the line_map (that lands in 3a-ii).
 
 ## Invariants
 

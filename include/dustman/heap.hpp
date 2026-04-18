@@ -23,7 +23,8 @@ inline constexpr std::size_t slot_bytes = alignof(void*);
 inline constexpr std::size_t max_slots_per_block = block_size / slot_bytes;
 inline constexpr std::size_t bitmap_bytes = (max_slots_per_block + 7) / 8;
 
-inline constexpr std::size_t line_size = 128;
+inline constexpr std::size_t line_size = 256;
+inline constexpr std::size_t line_body_size = line_size - sizeof(void*);
 inline constexpr std::size_t line_map_bytes = block_size / line_size;
 
 enum class GcState : std::uint8_t {
@@ -96,7 +97,7 @@ inline void set_start(const void* obj) noexcept {
 
 struct Tlab {
   std::byte* cursor = nullptr;
-  std::byte* end = nullptr;
+  std::byte* line_end = nullptr;
 };
 
 extern thread_local Tlab current_tlab;

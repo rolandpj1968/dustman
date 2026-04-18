@@ -30,7 +30,8 @@ TEST_CASE("block geometry is self-consistent", "[block]") {
   STATIC_REQUIRE(dustman::detail::block_size == 32 * 1024);
   STATIC_REQUIRE(dustman::detail::block_alignment == dustman::detail::block_size);
   STATIC_REQUIRE(dustman::detail::slot_bytes == alignof(void*));
-  STATIC_REQUIRE(dustman::detail::line_size == 128);
+  STATIC_REQUIRE(dustman::detail::line_size == 256);
+  STATIC_REQUIRE(dustman::detail::line_body_size == 248);
   STATIC_REQUIRE(dustman::detail::block_body_size ==
                  dustman::detail::block_size - dustman::detail::block_header_size);
   STATIC_REQUIRE(dustman::detail::bitmap_bytes * 8 * dustman::detail::slot_bytes >=

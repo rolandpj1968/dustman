@@ -28,13 +28,14 @@ constexpr std::size_t object_bytes() noexcept {
 template <typename T>
 inline void* alloc_raw() {
   constexpr std::size_t size = object_bytes<T>();
-  static_assert(size <= block_body_size, "dustman: allocation too large for a single block");
+  static_assert(size <= line_size, "dustman phase 3a-ii: object exceeds line size; "
+                                   "medium (3a-iii) and huge (3a-iv) tiers not yet implemented");
 
   Tlab& tlab = current_tlab;
   std::byte* cursor = tlab.cursor;
-  std::byte* end = tlab.end;
+  std::byte* line_end = tlab.line_end;
   if (cursor != nullptr) {
-    const std::size_t available = static_cast<std::size_t>(end - cursor);
+    const std::size_t available = static_cast<std::size_t>(line_end - cursor);
     if (available >= size) {
       tlab.cursor = cursor + size;
       return cursor;

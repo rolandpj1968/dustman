@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <new>
+#include <utility>
 #include <vector>
 
 #include "dustman/gc_ptr.hpp"
@@ -26,6 +27,16 @@ thread_local std::vector<std::size_t> root_free_;
 }
 
 namespace {
+
+constexpr std::size_t npos = static_cast<std::size_t>(-1);
+
+std::size_t find_free_line_in(const BlockHeader* h, std::size_t start_line) noexcept {
+  for (std::size_t line = start_line; line < lines_per_block; ++line) {
+    if (h->line_map[line] == 0)
+      return line;
+  }
+  return npos;
+}
 
 class Heap {
 public:
@@ -64,6 +75,19 @@ public:
       return false;
     });
     blocks_.erase(new_end, blocks_.end());
+  }
+
+  std::pair<BlockHeader*, std::size_t> find_free_line(const BlockHeader* exclude) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (void* block : blocks_) {
+      auto* h = static_cast<BlockHeader*>(block);
+      if (h == exclude)
+        continue;
+      std::size_t line = find_free_line_in(h, 0);
+      if (line != npos)
+        return {h, line};
+    }
+    return {nullptr, npos};
   }
 
   std::size_t size() {
@@ -135,18 +159,41 @@ void compute_line_map(BlockHeader* h) noexcept {
   }
 }
 
+void* claim_line(BlockHeader* h, std::size_t line, std::size_t size) noexcept {
+  h->line_map[line] = 1;
+  auto* block_base = reinterpret_cast<std::byte*>(h);
+  auto* body_start = block_base + block_header_size;
+  auto* line_start = body_start + line * line_size;
+
+  Tlab& tlab = current_tlab;
+  tlab.cursor = line_start + size;
+  tlab.line_end = line_start + line_size;
+  return line_start;
+}
+
+void* alloc_slow_fresh_block(std::size_t size) {
+  auto* block = static_cast<std::byte*>(Heap::instance().acquire_block());
+  new (block) BlockHeader {};
+  BlockHeader* h = reinterpret_cast<BlockHeader*>(block);
+  return claim_line(h, 0, size);
+}
+
 } // namespace
 
 void* alloc_slow(std::size_t size) {
-  auto* block = static_cast<std::byte*>(Heap::instance().acquire_block());
-  new (block) BlockHeader {};
-
-  auto* body = block + block_header_size;
-
   Tlab& tlab = current_tlab;
-  tlab.cursor = body + size;
-  tlab.end = block + block_size;
-  return body;
+
+  BlockHeader* current_block = (tlab.cursor != nullptr) ? header_of(tlab.cursor) : nullptr;
+
+  if (current_block != nullptr) {
+    std::size_t start_line = line_of(tlab.cursor) + 1;
+    std::size_t line = find_free_line_in(current_block, start_line);
+    if (line != npos) {
+      return claim_line(current_block, line, size);
+    }
+  }
+
+  return alloc_slow_fresh_block(size);
 }
 
 void clear_all_marks() noexcept {
