@@ -138,6 +138,64 @@ The `Tracer<T>` specialisation mechanism decouples **how the GC dispatches traci
 
 Green-field consumers who don't need this flexibility still get the ergonomic shortcut via `dustman::Object` — nothing is lost, and the inheritance-free path remains available.
 
+## Mechanical sympathy with the memory hierarchy
+
+Immix's structural choices — blocks of ~32 KB, lines of ~128 B, out-of-line mark bitmaps, per-thread bump allocation — are not arbitrary. Each is aligned to a concrete property of modern CPUs. Deviating from those sizes and layouts forfeits most of the performance argument for a tracing collector over refcounting or free-list allocation. This section captures the *why* behind the structural choices; the roadmap that follows describes when each one lands.
+
+### Cache lines and line granularity
+
+Lines are sized to a small multiple of the hardware cache line (typically 64 B on x86-64, 64 or 128 B on ARM). Writes into a freshly-allocated line are absorbed by the store buffer and can be flushed to a line the CPU never had to fetch first — no read-for-ownership, no coherency round-trip. This matters when bump-allocating tens of millions of small objects per second.
+
+Reclamation is per-line for the same reason: a line is either fully live, fully dead, or mixed, and the coarsest safe granularity that still permits reuse is the cache line. Reclaiming at word granularity (free-list allocators) fragments lines and poisons the cache.
+
+### Blocks, pages, and the TLB
+
+Blocks are page-multiple (32 KB ≈ 8 × 4 KB pages, or a fraction of a 2 MB huge page), not page-sized. This matters in three ways:
+
+- A thread's hot block stays resident in the TLB for the duration of many allocations — the allocation path never pays a TLB miss.
+- Block-level OS interactions (acquire, release, `madvise(DONTNEED)` on empty blocks) operate on page-aligned, page-multiple regions, which the kernel handles cleanly.
+- Huge-page backing for the block pool dramatically reduces TLB pressure on large heaps. One TLB entry covers 2 MB rather than 4 KB — decisive for pointer-chasing workloads during the mark phase.
+
+### Bump allocation and the branch predictor
+
+The fast path is:
+
+```
+if (cursor + size <= tlab_end) { cursor += size; return obj; }
+```
+
+The branch is taken ~99% of the time — TLAB exhaustion is rare by design. Modern branch predictors handle it perfectly, and the whole path costs a handful of cycles. Free-list allocators pay tens of cycles on size-class lookup and free-list traversal, with much less predictable control flow.
+
+Writes into a freshly-allocated line are also contiguous and sequential, ideal for the store buffer and write-combining logic, and prefetch-friendly for the subsequent constructor reads.
+
+### False sharing and per-thread TLABs
+
+Thread-local allocation buffers are block-aligned: no two threads' hot allocation regions share a cache line, so no coherency traffic flows between cores during allocation. This is the single most important lock-free-allocation property to get right — a naïve shared bump pointer produces cache-line ping-pong that dominates allocation cost past two cores.
+
+The same discipline extends to collector-internal state. Per-thread mark queues, remembered-set fragments, and collection counters are cache-line-padded. The inner loops of the marker and sweeper are exquisitely sensitive to false sharing.
+
+### Out-of-line mark bitmaps
+
+Mark bits live in a side table per block — a tightly packed array — not in the object header. Three consequences:
+
+- Marking an object doesn't dirty the object's own cache line. Under concurrent marking, where the mutator may be actively reading the object, this avoids a coherency invalidation on every mark.
+- The mark phase has high spatial locality: walking the bitmap is a sequential scan over a small, dense array — prefetch-friendly, L1-resident.
+- Mark-bit clearing at the start of a cycle is a bulk `memset`-equivalent over contiguous memory, not scattered writes across the heap.
+
+### Generational collection and cache residency
+
+Most allocations die young. The nursery is sized to fit comfortably within the L2 or L3 cache of the mutator thread, so by the time it is collected, most of its contents are still hot. The mark phase then costs almost nothing: it scans memory the mutator touched seconds ago, still resident in the cache hierarchy.
+
+Contrast with a single-heap collector that scans tenured and young generations together: it unavoidably touches cold memory and pulls it back through L3 → DRAM, displacing the mutator's working set on every collection.
+
+### Why this beats the alternatives
+
+- **`std::shared_ptr`.** Every copy performs an atomic increment on the control block — a separate cache line from the object, often in a different cache set. Atomic RMW stalls the pipeline. Every destructor does the reverse. Allocation-heavy workloads pay this on essentially every operation.
+- **`malloc` / free-list allocators.** Size-class lookups, coalescing, and free-list chasing dirty many cache lines per allocation. Good general-purpose allocators amortise this well, but they cannot compete with bump allocation on pure throughput.
+- **Conservative / non-moving collectors (Boehm).** Cannot compact. Over time the heap fragments into cache-unfriendly layouts; retained garbage further dilutes cache density. Mark bits in object headers (when used) add coherency cost under concurrent marking.
+
+Immix's structure exists precisely because the hardware rewards it: linear writes, cached reads, no false sharing, predictable branches, TLB-friendly strides. The performance advantage over refcounting is not "less bookkeeping" — it is *fewer cache misses and fewer coherency round-trips per allocation*.
+
 ## Roadmap
 
 Implementation follows a pragmatic migration path, but the API and header layout are designed for the endpoint from day one — concurrency, generations, and movement cannot be cleanly retro-fitted.
