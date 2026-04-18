@@ -8,6 +8,7 @@ Rules are obeyed unless there is a concrete reason to deviate. When deviating, l
 
 - **Namespaces**: lowercase, short (`dustman`, `dustman::detail`).
 - **Types** (classes, structs, enums, aliases): CamelCase (`TypeInfo`, `Visitor`, `Tracer`).
+- **Acronyms in type names**: treat as single words — `Tlab` (not `TLAB`), `XmlParser` (not `XMLParser`), `HtmlWriter` (not `HTMLWriter`). This keeps the CamelCase rule mechanical, avoids ambiguity at acronym/word boundaries (`XMLParser` or `XmlParser`?), and matches the dominant convention in Google C++ style and modern-era codebases. Strict-acronym style (all-caps inside a CamelCase name) is rejected for this project.
 - **Smart-pointer-like types**: snake_case, matching std convention (`gc_ptr`, not `GcPtr`).
 - **Functions, methods, variables**: snake_case (`visit`, `trace_trampoline`, `version_major`).
 - **Macros**: `UPPER_SNAKE_CASE`, `DUSTMAN_` prefix (`DUSTMAN_VERSION_MAJOR`).
@@ -71,7 +72,8 @@ IWYU ("include what you use"): every file includes what it references directly. 
 ## 8. Constructors and initialisation
 
 - **`explicit`** on every single-argument constructor unless implicit conversion is genuinely desired.
-- **Brace-init** (`T x {…}`) as default; parenthesised construction only when brace-init collides with an initializer-list constructor (rare).
+- **Brace-init** (`T x {…}`) as default for variable declarations; parenthesised construction only when brace-init collides with an initializer-list constructor (rare in our code; mostly appears with STL containers such as `std::vector<int> v (10);`, where `v {10}` would be a one-element vector rather than a ten-element one).
+- **Default member initializers** use **equals-form** for simple scalar initialisations (`std::byte* cursor = nullptr;`, `int v = 0;`), and **brace-form** for multi-argument or aggregate initialisations (`Point p {x, y};`). Brace-form is also used anywhere a narrowing conversion must be rejected at compile time (`int n {d};` errors if `d` is a `double`, whereas `int n = d;` silently truncates). Equals-form has the additional property of side-stepping `std::initializer_list<T>` constructor preference — for types that have one, brace-form in a default member initializer could select an unexpected overload.
 - **Trailing commas** in multi-line aggregate initialisers — reduces diff noise.
 
 ## 9. Functions
