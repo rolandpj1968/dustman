@@ -4,7 +4,6 @@
 #include <cstdlib>
 #include <mutex>
 #include <new>
-#include <utility>
 #include <vector>
 
 #include "dustman/gc_ptr.hpp"
@@ -13,7 +12,8 @@
 
 namespace dustman::detail {
 
-thread_local Tlab current_tlab;
+thread_local Tlab small_tlab;
+thread_local Tlab medium_tlab;
 
 thread_local std::vector<gc_ptr_base*> root_slots_;
 thread_local std::vector<std::size_t> root_free_;
@@ -38,6 +38,10 @@ std::size_t find_free_line_in(const BlockHeader* h, std::size_t start_line) noex
   return npos;
 }
 
+bool block_has_any_free_line(const BlockHeader* h) noexcept {
+  return find_free_line_in(h, 0) != npos;
+}
+
 class Heap {
 public:
   static Heap& instance() {
@@ -45,13 +49,16 @@ public:
     return h;
   }
 
-  void* acquire_block() {
+  void* acquire_block(std::uint32_t flags) {
     std::lock_guard<std::mutex> lock(mu_);
     void* block = std::aligned_alloc(block_alignment, block_size);
     if (block == nullptr) {
       fatal_oom();
     }
     blocks_.push_back(block);
+    auto* h = static_cast<BlockHeader*>(block);
+    new (h) BlockHeader {};
+    h->flags = flags;
     return block;
   }
 
@@ -66,6 +73,7 @@ public:
   template <typename Pred>
   void remove_blocks_if(Pred&& pred) {
     std::lock_guard<std::mutex> lock(mu_);
+    small_recycle_.clear();
     auto new_end = std::remove_if(blocks_.begin(), blocks_.end(), [&pred](void* block) {
       auto* h = static_cast<BlockHeader*>(block);
       if (pred(h)) {
@@ -75,19 +83,24 @@ public:
       return false;
     });
     blocks_.erase(new_end, blocks_.end());
-  }
-
-  std::pair<BlockHeader*, std::size_t> find_free_line(const BlockHeader* exclude) {
-    std::lock_guard<std::mutex> lock(mu_);
     for (void* block : blocks_) {
       auto* h = static_cast<BlockHeader*>(block);
-      if (h == exclude)
-        continue;
-      std::size_t line = find_free_line_in(h, 0);
-      if (line != npos)
-        return {h, line};
+      if (!is_medium_block(h) && block_has_any_free_line(h)) {
+        small_recycle_.push_back(h);
+      }
     }
-    return {nullptr, npos};
+  }
+
+  BlockHeader* pop_small_recycled() {
+    std::lock_guard<std::mutex> lock(mu_);
+    while (!small_recycle_.empty()) {
+      BlockHeader* h = small_recycle_.back();
+      small_recycle_.pop_back();
+      if (block_has_any_free_line(h)) {
+        return h;
+      }
+    }
+    return nullptr;
   }
 
   std::size_t size() {
@@ -98,6 +111,7 @@ public:
 private:
   std::mutex mu_;
   std::vector<void*> blocks_;
+  std::vector<BlockHeader*> small_recycle_;
 };
 
 bool block_has_any_mark(BlockHeader* h) noexcept {
@@ -165,35 +179,50 @@ void* claim_line(BlockHeader* h, std::size_t line, std::size_t size) noexcept {
   auto* body_start = block_base + block_header_size;
   auto* line_start = body_start + line * line_size;
 
-  Tlab& tlab = current_tlab;
-  tlab.cursor = line_start + size;
-  tlab.line_end = line_start + line_size;
+  small_tlab.cursor = line_start + size;
+  small_tlab.end = line_start + line_size;
   return line_start;
 }
 
-void* alloc_slow_fresh_block(std::size_t size) {
-  auto* block = static_cast<std::byte*>(Heap::instance().acquire_block());
-  new (block) BlockHeader {};
+void* alloc_fresh_small_block(std::size_t size) {
+  auto* block = static_cast<std::byte*>(Heap::instance().acquire_block(0));
   BlockHeader* h = reinterpret_cast<BlockHeader*>(block);
   return claim_line(h, 0, size);
 }
 
+void* alloc_fresh_medium_block(std::size_t size) {
+  auto* block = static_cast<std::byte*>(Heap::instance().acquire_block(flag_block_medium));
+  auto* body = block + block_header_size;
+
+  medium_tlab.cursor = body + size;
+  medium_tlab.end = block + block_size;
+  return body;
+}
+
 } // namespace
 
-void* alloc_slow(std::size_t size) {
-  Tlab& tlab = current_tlab;
+void* alloc_slow_small(std::size_t size) {
+  BlockHeader* current = (small_tlab.cursor != nullptr) ? header_of(small_tlab.cursor) : nullptr;
 
-  BlockHeader* current_block = (tlab.cursor != nullptr) ? header_of(tlab.cursor) : nullptr;
-
-  if (current_block != nullptr) {
-    std::size_t start_line = line_of(tlab.cursor) + 1;
-    std::size_t line = find_free_line_in(current_block, start_line);
+  if (current != nullptr) {
+    std::size_t start_line = line_of(small_tlab.cursor) + 1;
+    std::size_t line = find_free_line_in(current, start_line);
     if (line != npos) {
-      return claim_line(current_block, line, size);
+      return claim_line(current, line, size);
     }
   }
 
-  return alloc_slow_fresh_block(size);
+  BlockHeader* recycled = Heap::instance().pop_small_recycled();
+  if (recycled != nullptr) {
+    std::size_t line = find_free_line_in(recycled, 0);
+    return claim_line(recycled, line, size);
+  }
+
+  return alloc_fresh_small_block(size);
+}
+
+void* alloc_slow_medium(std::size_t size) {
+  return alloc_fresh_medium_block(size);
 }
 
 void clear_all_marks() noexcept {
@@ -206,7 +235,9 @@ void sweep_all_blocks() noexcept {
       destroy_all_objects_in(h);
       return true;
     }
-    compute_line_map(h);
+    if (!is_medium_block(h)) {
+      compute_line_map(h);
+    }
     return false;
   });
 }

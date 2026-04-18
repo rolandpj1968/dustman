@@ -61,8 +61,10 @@ void collect() noexcept {
 
   detail::gc_state = detail::GcState::sweeping;
 
-  detail::current_tlab.cursor = nullptr;
-  detail::current_tlab.line_end = nullptr;
+  detail::small_tlab.cursor = nullptr;
+  detail::small_tlab.end = nullptr;
+  detail::medium_tlab.cursor = nullptr;
+  detail::medium_tlab.end = nullptr;
 
   detail::sweep_all_blocks();
 

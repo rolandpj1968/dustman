@@ -14,6 +14,8 @@ add_executable(dustman_tests
   test_block.cpp
   test_collect.cpp
   test_gc_ptr.cpp
+  test_medium.cpp
+  test_recycle.cpp
   test_root.cpp
   test_sweep.cpp
   test_tracer.cpp

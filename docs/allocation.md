@@ -5,8 +5,8 @@ This document captures the allocation tier structure of dustman's heap, and the 
 ## Three size tiers
 
 ```
-Small    (≤ 256 B / one line)   → line-aware bump in shared small blocks     [phase 3a-ii]
-Medium   (256 B .. 4 KiB)       → dedicated medium blocks, bump-only          [phase 3a-iii]
+Small    (≤ 256 B / one line)   → line-aware bump in shared small blocks     [phase 3a-ii ✔]
+Medium   (256 B .. 4 KiB)       → dedicated medium blocks, bump-only          [phase 3a-iii ✔]
 Huge     (> 4 KiB)              → mmap per object, tracked externally          [phase 3a-iv]
 ```
 
@@ -62,7 +62,7 @@ Once dustman hosts a real workload (Frozone), we can measure the actual object-s
 Dustman's tiers are Immix's tiers, with one deliberate simplification:
 
 - Dustman "small" ↔ Immix "small" (bump within line).
-- Dustman "medium" ↔ Immix "medium" — but **our medium uses dedicated blocks** rather than multi-line runs inside shared blocks.
+- Dustman "medium" ↔ Immix "medium" — but **our medium uses dedicated blocks** rather than multi-line runs inside shared blocks. A block is flagged `small` or `medium` at acquisition time via `BlockHeader.flags`; sweep branches on the flag (line_map rebuild + recycle push for small, whole-block check for medium).
 - Dustman "huge" ↔ Immix "LOS" (large-object space, externally tracked).
 
 Classic Immix mixes small and medium within the same block, and reclaims medium via contiguous free-line runs. Dustman separates them onto different block pools. This keeps each allocator's code self-contained at the cost of some memory density (a medium block is always medium even if it has unused line space).
@@ -86,10 +86,8 @@ Fragmentation is thus bounded in the steady state by the per-cycle evacuation bu
 - `TypeInfo` dispatch is tier-agnostic; sweep, destroy, and tracing work the same way regardless of where the object lives.
 - The consumer contract (no tracer allocations, destructors don't dereference GC-managed state, no raw `T*` across safepoints once movement arrives) applies uniformly.
 
-## Cross-block reuse (not in this commit)
+## Cross-block reuse
 
-Phase 3a-ii only reuses lines within the **current** small block. When the current block's lines are exhausted, the allocator acquires a fresh block from the OS rather than scanning other kept blocks for their free lines. A prototype that scanned all kept blocks on every slow-path event showed quadratic-ish cost under allocation-heavy workloads (block-exhaust events × blocks-scanned accumulated meaningful overhead per allocation).
+Phase 3a-iii landed the **small recycle list**. Sweep pushes every surviving small block that has at least one free line onto `Heap::small_recycle_`. When the current small-TLAB exhausts its block, `alloc_slow_small` pops from the recycle list before reaching for a fresh OS-backed block. Old kept blocks' free lines are actually reused; line reclamation is now the full Immix reclamation story at the small-block level.
 
-The correct fix is a **recycle list** populated by sweep: blocks with known free lines are placed in a per-heap stack, and allocation pops from it in O(1) before considering a new block. That lands as a follow-up (phase 3a-iii) alongside the medium tier, where the same infrastructure serves both.
-
-In the interim, kept blocks' free lines are wasted until those blocks go fully dead. Fragmentation behaviour is therefore similar to phase 2c plus within-block line reuse — a modest improvement, but not the full Immix reclamation story until the recycle list arrives.
+Medium blocks do not participate in the recycle list — the bump-only medium allocator can only use a block until its cursor reaches the block's end, at which point the block is effectively "full" for allocation purposes (dead slots remain inside until the whole block dies or compaction runs). When a medium block goes fully dead, sweep frees it.

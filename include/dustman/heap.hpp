@@ -27,6 +27,10 @@ inline constexpr std::size_t line_size = 256;
 inline constexpr std::size_t line_body_size = line_size - sizeof(void*);
 inline constexpr std::size_t line_map_bytes = block_size / line_size;
 
+inline constexpr std::size_t medium_size_limit = 4 * 1024;
+
+inline constexpr std::uint32_t flag_block_medium = 1u << 0;
+
 enum class GcState : std::uint8_t {
   idle,
   marking,
@@ -67,6 +71,10 @@ inline std::size_t line_of(const void* p) noexcept {
   return (addr - body) / line_size;
 }
 
+inline bool is_medium_block(const BlockHeader* h) noexcept {
+  return (h->flags & flag_block_medium) != 0;
+}
+
 inline bool is_marked(const void* obj) noexcept {
   BlockHeader* h = header_of(obj);
   std::size_t slot = slot_index(obj);
@@ -97,14 +105,26 @@ inline void set_start(const void* obj) noexcept {
 
 struct Tlab {
   std::byte* cursor = nullptr;
-  std::byte* line_end = nullptr;
+  std::byte* end = nullptr;
 };
 
-extern thread_local Tlab current_tlab;
+extern thread_local Tlab small_tlab;
+extern thread_local Tlab medium_tlab;
 
 extern thread_local bool collecting_;
 
-void* alloc_slow(std::size_t size);
+inline void* tlab_bump(Tlab& tlab, std::size_t size) noexcept {
+  std::byte* cursor = tlab.cursor;
+  std::byte* end = tlab.end;
+  if (cursor != nullptr && static_cast<std::size_t>(end - cursor) >= size) {
+    tlab.cursor = cursor + size;
+    return cursor;
+  }
+  return nullptr;
+}
+
+void* alloc_slow_small(std::size_t size);
+void* alloc_slow_medium(std::size_t size);
 
 void clear_all_marks() noexcept;
 void sweep_all_blocks() noexcept;

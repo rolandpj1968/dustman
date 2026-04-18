@@ -25,23 +25,13 @@ constexpr std::size_t object_bytes() noexcept {
   return round_up(total, alignof(void*));
 }
 
-template <typename T>
-inline void* alloc_raw() {
-  constexpr std::size_t size = object_bytes<T>();
-  static_assert(size <= line_size, "dustman phase 3a-ii: object exceeds line size; "
-                                   "medium (3a-iii) and huge (3a-iv) tiers not yet implemented");
-
-  Tlab& tlab = current_tlab;
-  std::byte* cursor = tlab.cursor;
-  std::byte* line_end = tlab.line_end;
-  if (cursor != nullptr) {
-    const std::size_t available = static_cast<std::size_t>(line_end - cursor);
-    if (available >= size) {
-      tlab.cursor = cursor + size;
-      return cursor;
-    }
-  }
-  return alloc_slow(size);
+template <typename T, typename... Args>
+inline gc_ptr<T> alloc_construct(void* hdr, Args&&... args) {
+  *static_cast<const TypeInfo**>(hdr) = &TypeInfoFor<T>::value;
+  void* body = static_cast<std::byte*>(hdr) + sizeof(const TypeInfo*);
+  set_start(body);
+  T* obj = new (body) T(std::forward<Args>(args)...);
+  return gc_ptr<T> {obj};
 }
 
 } // namespace detail
@@ -51,12 +41,23 @@ gc_ptr<T> alloc(Args&&... args) {
   if (detail::collecting_) {
     detail::fatal_reentrant_collect();
   }
-  void* hdr = detail::alloc_raw<T>();
-  *static_cast<const TypeInfo**>(hdr) = &TypeInfoFor<T>::value;
-  void* body = static_cast<std::byte*>(hdr) + sizeof(const TypeInfo*);
-  detail::set_start(body);
-  T* obj = new (body) T(std::forward<Args>(args)...);
-  return gc_ptr<T> {obj};
+
+  constexpr std::size_t size = detail::object_bytes<T>();
+  static_assert(size <= detail::medium_size_limit,
+                "dustman phase 3a-iv: huge tier (> 4 KiB) not yet implemented");
+
+  void* hdr;
+  if constexpr (size <= detail::line_size) {
+    hdr = detail::tlab_bump(detail::small_tlab, size);
+    if (hdr == nullptr)
+      hdr = detail::alloc_slow_small(size);
+  } else {
+    hdr = detail::tlab_bump(detail::medium_tlab, size);
+    if (hdr == nullptr)
+      hdr = detail::alloc_slow_medium(size);
+  }
+
+  return detail::alloc_construct<T>(hdr, std::forward<Args>(args)...);
 }
 
 } // namespace dustman
