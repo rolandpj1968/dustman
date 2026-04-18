@@ -31,6 +31,7 @@ add_library(dustman)
 add_library(dustman::dustman ALIAS dustman)
 
 target_sources(dustman PRIVATE
+  src/collect.cpp
   src/heap.cpp
 )
 

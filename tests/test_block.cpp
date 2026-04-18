@@ -48,18 +48,12 @@ TEST_CASE("header_of() returns the 32 KiB-aligned base of the containing block",
   REQUIRE(body_addr < header_addr + dustman::detail::block_size);
 }
 
-TEST_CASE("block header is zero-initialized at acquisition", "[block]") {
+TEST_CASE("block header has zero flags and live_count after allocation", "[block]") {
   auto p = dustman::alloc<Small>();
   auto* h = dustman::detail::header_of(p.get());
 
   REQUIRE(h->flags == 0);
   REQUIRE(h->live_count == 0);
-  for (std::uint8_t byte : h->mark_bitmap) {
-    REQUIRE(byte == 0);
-  }
-  for (std::uint8_t byte : h->start_bitmap) {
-    REQUIRE(byte == 0);
-  }
 }
 
 TEST_CASE("slot_index returns monotonically increasing values within a block", "[block]") {

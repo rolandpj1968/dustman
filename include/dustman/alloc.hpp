@@ -47,9 +47,13 @@ inline void* alloc_raw() {
 
 template <typename T, typename... Args>
 gc_ptr<T> alloc(Args&&... args) {
+  if (detail::collecting_) {
+    detail::fatal_reentrant_collect();
+  }
   void* hdr = detail::alloc_raw<T>();
   *static_cast<const TypeInfo**>(hdr) = &TypeInfoFor<T>::value;
   void* body = static_cast<std::byte*>(hdr) + sizeof(const TypeInfo*);
+  detail::set_start(body);
   T* obj = new (body) T(std::forward<Args>(args)...);
   return gc_ptr<T> {obj};
 }

@@ -5,6 +5,7 @@
 #define DUSTMAN_VERSION_PATCH 1
 
 #include "dustman/alloc.hpp"
+#include "dustman/collect.hpp"
 #include "dustman/gc_ptr.hpp"
 #include "dustman/root.hpp"
 #include "dustman/tracer.hpp"

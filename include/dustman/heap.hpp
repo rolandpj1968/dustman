@@ -54,6 +54,34 @@ inline std::size_t slot_index(const void* p) noexcept {
   return (addr - body) / slot_bytes;
 }
 
+inline bool is_marked(const void* obj) noexcept {
+  BlockHeader* h = header_of(obj);
+  std::size_t slot = slot_index(obj);
+  std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+  return (h->mark_bitmap[slot / 8] & mask) != 0;
+}
+
+inline void set_mark(const void* obj) noexcept {
+  BlockHeader* h = header_of(obj);
+  std::size_t slot = slot_index(obj);
+  std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+  h->mark_bitmap[slot / 8] |= mask;
+}
+
+inline bool is_start(const void* obj) noexcept {
+  BlockHeader* h = header_of(obj);
+  std::size_t slot = slot_index(obj);
+  std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+  return (h->start_bitmap[slot / 8] & mask) != 0;
+}
+
+inline void set_start(const void* obj) noexcept {
+  BlockHeader* h = header_of(obj);
+  std::size_t slot = slot_index(obj);
+  std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+  h->start_bitmap[slot / 8] |= mask;
+}
+
 struct Tlab {
   std::byte* cursor = nullptr;
   std::byte* end = nullptr;
@@ -61,9 +89,14 @@ struct Tlab {
 
 extern thread_local Tlab current_tlab;
 
+extern thread_local bool collecting_;
+
 void* alloc_slow(std::size_t size);
 
+void clear_all_marks() noexcept;
+
 [[noreturn]] void fatal_oom() noexcept;
+[[noreturn]] void fatal_reentrant_collect() noexcept;
 
 std::size_t register_root_slot(gc_ptr_base* p) noexcept;
 void unregister_root_slot(std::size_t slot) noexcept;

@@ -19,6 +19,10 @@ thread_local std::vector<std::size_t> root_free_;
   std::abort();
 }
 
+[[noreturn]] void fatal_reentrant_collect() noexcept {
+  std::abort();
+}
+
 namespace {
 
 class Heap {
@@ -38,6 +42,14 @@ public:
     return block;
   }
 
+  template <typename F>
+  void for_each_block(F&& f) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (void* block : blocks_) {
+      f(static_cast<BlockHeader*>(block));
+    }
+  }
+
 private:
   std::mutex mu_;
   std::vector<void*> blocks_;
@@ -55,6 +67,10 @@ void* alloc_slow(std::size_t size) {
   tlab.cursor = body + size;
   tlab.end = block + block_size;
   return body;
+}
+
+void clear_all_marks() noexcept {
+  Heap::instance().for_each_block([](BlockHeader* h) { h->mark_bitmap.fill(0); });
 }
 
 std::size_t register_root_slot(gc_ptr_base* p) noexcept {
