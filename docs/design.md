@@ -19,6 +19,12 @@ This document captures the core design decisions behind dustman — what it is, 
 - **Zero-overhead opt-out.** Consumers who want reference-counted or manual memory keep using what they have. Dustman is for code willing to commit to tracing.
 - **Fully automatic for arbitrary C++ today.** Some deliberate tracer code is required per type. See [Precise tracing contract](#precise-tracing-contract).
 
+## Target platform and language
+
+Dustman targets **C++17** as its language floor, on **Linux x86-64** as the primary platform with Linux arm64 as a secondary target. macOS and Windows are explicitly deferred until a consumer needs them. 32-bit platforms and big-endian architectures are unsupported.
+
+The full rationale — why C++17 specifically (rather than C++11 or C++20), which compiler versions, which architectures, and what assumptions about word size, alignment, and page size are baked into the design — is captured in [`docs/platform.md`](platform.md). That document is the reference when a platform or standard decision needs to be reopened.
+
 ## Library architecture
 
 Dustman is a **hybrid**: header-only for the hot-path and templated surface, with a linked `.cpp` backend for global state and platform-specific code. Consumers `#include <dustman/dustman.hpp>` and link a compiled archive (`libdustman.a` or the shared equivalent).
