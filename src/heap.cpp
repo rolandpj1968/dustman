@@ -25,6 +25,7 @@ struct ThreadRootSet {
 thread_local ThreadRootSet my_roots_;
 
 thread_local bool attached_ = false;
+thread_local bool native_ = false;
 
 namespace {
 
@@ -54,6 +55,7 @@ bool pause_is_set() noexcept {
 void safepoint_slow() noexcept {
   if (collecting_) return;
   if (!attached_) return;
+  if (native_) return;
   small_tlab = {};
   medium_tlab = {};
   std::unique_lock<std::mutex> lk(stw_mu_);
@@ -126,6 +128,26 @@ void detach_thread() noexcept {
       detail::all_thread_roots_.erase(it);
     }
   }
+}
+
+void enter_native() noexcept {
+  if (!detail::attached_) return;
+  if (detail::native_) return;
+  if (detail::collecting_) return;
+  detail::small_tlab = {};
+  detail::medium_tlab = {};
+  std::unique_lock<std::mutex> lk(detail::stw_mu_);
+  ++detail::parked_count_;
+  detail::native_ = true;
+  detail::stw_cv_.notify_all();
+}
+
+void leave_native() noexcept {
+  if (!detail::native_) return;
+  std::unique_lock<std::mutex> lk(detail::stw_mu_);
+  detail::stw_cv_.wait(lk, [] { return !detail::pause_is_set(); });
+  --detail::parked_count_;
+  detail::native_ = false;
 }
 
 } // namespace dustman

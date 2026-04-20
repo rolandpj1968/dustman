@@ -15,6 +15,7 @@ class Visitor;
 namespace detail {
 inline std::atomic<bool> pause_requested_ {false};
 extern thread_local bool attached_;
+extern thread_local bool native_;
 
 void safepoint_slow() noexcept;
 } // namespace detail
@@ -27,6 +28,8 @@ inline void safepoint() noexcept {
 
 void attach_thread() noexcept;
 void detach_thread() noexcept;
+void enter_native() noexcept;
+void leave_native() noexcept;
 
 namespace detail {
 inline std::atomic<std::uint32_t> evacuation_threshold_percent_ {25};
