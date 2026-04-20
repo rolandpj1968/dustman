@@ -11,6 +11,7 @@ add_executable(dustman_tests
   test_smoke.cpp
   test_alloc.cpp
   test_alloc_stress.cpp
+  test_auto_collect.cpp
   test_block.cpp
   test_collect.cpp
   test_evacuate.cpp

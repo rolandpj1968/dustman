@@ -91,6 +91,44 @@ inline bool get_auto_collect_enabled() noexcept {
 }
 
 namespace detail {
+inline std::atomic<std::size_t> minor_count_ {0};
+inline std::atomic<std::size_t> major_count_ {0};
+inline std::atomic<std::size_t> total_bytes_allocated_ {0};
+inline std::atomic<std::uint64_t> last_minor_pause_us_ {0};
+inline std::atomic<std::uint64_t> last_major_pause_us_ {0};
+}
+
+struct HeapStats {
+  std::size_t minor_count = 0;
+  std::size_t major_count = 0;
+  std::size_t total_bytes_allocated = 0;
+  std::size_t current_heap_bytes = 0;
+  std::size_t current_young_bytes = 0;
+  std::size_t current_old_bytes = 0;
+  std::size_t huge_bytes = 0;
+  std::uint64_t last_minor_pause_us = 0;
+  std::uint64_t last_major_pause_us = 0;
+};
+
+HeapStats heap_stats() noexcept;
+
+inline std::size_t get_minor_count() noexcept {
+  return detail::minor_count_.load(std::memory_order_relaxed);
+}
+
+inline std::size_t get_major_count() noexcept {
+  return detail::major_count_.load(std::memory_order_relaxed);
+}
+
+inline std::uint64_t get_last_minor_pause_us() noexcept {
+  return detail::last_minor_pause_us_.load(std::memory_order_relaxed);
+}
+
+inline std::uint64_t get_last_major_pause_us() noexcept {
+  return detail::last_major_pause_us_.load(std::memory_order_relaxed);
+}
+
+namespace detail {
 
 inline constexpr std::size_t block_size = 32 * 1024;
 inline constexpr std::size_t block_alignment = block_size;

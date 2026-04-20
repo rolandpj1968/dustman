@@ -68,6 +68,13 @@ void unregister_heap_block_base(std::uintptr_t base) noexcept {
   block_set_.erase(base);
 }
 
+struct HeapSnapshotOut {
+  std::size_t young_bytes;
+  std::size_t old_bytes;
+  std::size_t huge_bytes;
+};
+HeapSnapshotOut get_heap_snapshot() noexcept;
+
 void gc_write_barrier(void* slot) noexcept {
   auto addr = reinterpret_cast<std::uintptr_t>(slot);
   auto base = addr & ~(block_alignment - 1);
@@ -136,6 +143,21 @@ void release_collector_slot() noexcept {
 } // namespace dustman::detail
 
 namespace dustman {
+
+HeapStats heap_stats() noexcept {
+  HeapStats s;
+  s.minor_count = detail::minor_count_.load(std::memory_order_relaxed);
+  s.major_count = detail::major_count_.load(std::memory_order_relaxed);
+  s.total_bytes_allocated = detail::total_bytes_allocated_.load(std::memory_order_relaxed);
+  s.last_minor_pause_us = detail::last_minor_pause_us_.load(std::memory_order_relaxed);
+  s.last_major_pause_us = detail::last_major_pause_us_.load(std::memory_order_relaxed);
+  auto snap = detail::get_heap_snapshot();
+  s.current_young_bytes = snap.young_bytes;
+  s.current_old_bytes = snap.old_bytes;
+  s.huge_bytes = snap.huge_bytes;
+  s.current_heap_bytes = snap.young_bytes + snap.old_bytes + snap.huge_bytes;
+  return s;
+}
 
 void attach_thread() noexcept {
   if (detail::attached_) return;
@@ -248,6 +270,7 @@ public:
     if (gen == Generation::Young) {
       bytes_since_last_minor_.fetch_add(block_body_size, std::memory_order_relaxed);
     }
+    total_bytes_allocated_.fetch_add(block_body_size, std::memory_order_relaxed);
     return block;
   }
 
@@ -272,7 +295,27 @@ public:
     void* hdr = static_cast<std::byte*>(base) + hdr_offset;
     huge_records_.push_back(HugeRecord {base, hdr, alloc_size, false, false});
     huge_live_bytes_ += alloc_size;
+    total_bytes_allocated_.fetch_add(alloc_size, std::memory_order_relaxed);
+    bytes_since_last_minor_.fetch_add(alloc_size, std::memory_order_relaxed);
     return hdr;
+  }
+
+  struct HeapSnapshot {
+    std::size_t young_bytes;
+    std::size_t old_bytes;
+    std::size_t huge_bytes;
+  };
+
+  HeapSnapshot snapshot() {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::size_t young = 0;
+    std::size_t old = 0;
+    for (void* block : blocks_) {
+      auto* h = static_cast<BlockHeader*>(block);
+      if (h->generation == Generation::Young) young += block_body_size;
+      else old += block_body_size;
+    }
+    return {young, old, huge_live_bytes_};
   }
 
   std::size_t count_old_bytes() {
@@ -785,6 +828,11 @@ void free_young_blocks_and_clear_cards(const std::vector<BlockHeader*>& youngs) 
 
 std::size_t count_old_block_bytes() noexcept {
   return Heap::instance().count_old_bytes();
+}
+
+HeapSnapshotOut get_heap_snapshot() noexcept {
+  auto snap = Heap::instance().snapshot();
+  return {snap.young_bytes, snap.old_bytes, snap.huge_bytes};
 }
 
 std::size_t heap_block_count() noexcept {

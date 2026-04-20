@@ -1,6 +1,7 @@
 #include "dustman/collect.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <unordered_set>
 #include <vector>
 
@@ -144,6 +145,8 @@ void collect() noexcept {
     return;
   }
 
+  auto pause_start = std::chrono::steady_clock::now();
+
   detail::collecting_ = true;
   detail::gc_state = detail::GcState::marking;
 
@@ -183,6 +186,12 @@ void collect() noexcept {
   std::size_t new_threshold = std::max(current_old * factor / 100, min_bytes);
   detail::major_threshold_bytes_.store(new_threshold, std::memory_order_relaxed);
 
+  auto pause_end = std::chrono::steady_clock::now();
+  auto pause_us = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(pause_end - pause_start).count());
+  detail::last_major_pause_us_.store(pause_us, std::memory_order_relaxed);
+  detail::major_count_.fetch_add(1, std::memory_order_relaxed);
+
   detail::gc_state = detail::GcState::idle;
   detail::collecting_ = false;
   detail::release_collector_slot();
@@ -198,6 +207,8 @@ void minor_collect() noexcept {
   if (!detail::acquire_collector_slot()) {
     return;
   }
+
+  auto pause_start = std::chrono::steady_clock::now();
 
   detail::collecting_ = true;
   detail::gc_state = detail::GcState::marking;
@@ -248,6 +259,12 @@ void minor_collect() noexcept {
   if (current_old >= detail::major_threshold_bytes_.load(std::memory_order_relaxed)) {
     detail::needs_major_.store(true, std::memory_order_relaxed);
   }
+
+  auto pause_end = std::chrono::steady_clock::now();
+  auto pause_us = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(pause_end - pause_start).count());
+  detail::last_minor_pause_us_.store(pause_us, std::memory_order_relaxed);
+  detail::minor_count_.fetch_add(1, std::memory_order_relaxed);
 
   detail::gc_state = detail::GcState::idle;
   detail::collecting_ = false;
