@@ -243,11 +243,11 @@ Landed:
 - **Phase 3a** — line-aware small allocator, recycle list, medium tier, huge side-table, over-alignment routing.
 - **Phase 3b** — opportunistic evacuation with forwarding pointers and `UpdateVisitor`; formal [`specs/collect.tla`](../specs/collect.tla).
 - **Phase 3.5** — multi-mutator stop-the-world with formal [`specs/stw.tla`](../specs/stw.tla): safepoint protocol, attach/detach lifecycle, collector-identity serialisation, `enter_native` / `leave_native` for external blocks, fast-path safepoint in `alloc<T>`.
+- **Phase 3c** — generational minor collect (`dustman::minor_collect()`) with a per-block 256 B card table and an unconditional write barrier in `gc_ptr<T>`; formal [`specs/gen.tla`](../specs/gen.tla) (`BarrierInvariant`). Major collect stays generation-agnostic — promoting-everything-on-major is a follow-on that fits under the same `alloc_target_gen_` plumbing.
 
 Remaining:
-- **Phase 3c** — generational (nursery + tenured) under the existing moving infrastructure.
-- **Phase 4** — concurrent / incremental marking with write barriers (own TLA+ spec planned).
-- **Deferred topics** (below): parallel STW, thread-local young generation.
+- **Phase 4** — concurrent / incremental marking with write barriers (own TLA+ spec planned, layered on top of the card-table barrier).
+- **Deferred topics** (below): parallel STW, thread-local young generation, small/medium tier boundary, reserved VA heap arena (fast barrier containment check).
 
 ### Deferred: parallel STW collection
 
@@ -270,6 +270,16 @@ Minor plumbing work: derive the boundary from `line_size` in one place rather th
 Per-thread nurseries are a clean win when the consumer commits to an isolation story (Ractor-style: no shared mutable state, or only via explicit channels); one thread's young-gen collects without touching others'. Under classical shared-memory semantics the remembered-set bookkeeping needed to handle cross-thread young-gen pointers tends to eat most of the locality benefit.
 
 Middle ground, which the current TLAB design already supports structurally: **shared nursery with per-thread TLABs**. Allocation locality lands for free; collection is still global. Revisit the per-thread-nursery question once Frozone's concurrency model is pinned down.
+
+### Deferred: reserved VA heap arena
+
+Phase 3c's write barrier does a `std::shared_mutex`-guarded `std::unordered_set` lookup on every `gc_ptr<T>` store to classify the slot as in-heap vs stack/global. Cost is ~50–100 ns per write. Correct for v1 but meaningful overhead on gc_ptr-heavy workloads.
+
+The production-GC answer is a reserved contiguous virtual arena: `mmap` a large region at startup, subdivide into 32 KiB blocks from that region only. The containment check then collapses to `(addr - heap_base) < heap_size` — one subtract, one compare, branchless. The card table also becomes a flat `byte[heap_size / 256]` indexable by `(addr - heap_base) >> 8`, which opens the door to SIMD card scanning (`vpmovmskb` over 16–32 cards per instruction).
+
+Uncommitted VA is cheap on 64-bit (2^48 usable, physical pages committed on write), so a 256 GiB reservation is essentially free. Heap growth handled either by pre-sizing or by chaining additional arenas.
+
+Not urgent; the hash-set barrier is correct and the perf delta only matters under real workload measurement.
 
 ## Testing and verification
 

@@ -1,6 +1,6 @@
 # Collection semantics
 
-This document captures the invariants, state machine, and failure modes of dustman's collection subsystem. It grows with each phase; today it covers through phase 3.5 (stop-the-world mark-sweep with opportunistic evacuation, multiple mutator threads). Later phases extend rather than replace.
+This document captures the invariants, state machine, and failure modes of dustman's collection subsystem. It grows with each phase; today it covers through phase 3c (stop-the-world mark-sweep with opportunistic evacuation, multiple mutator threads, generational minor collect). Later phases extend rather than replace.
 
 ## State machine
 
@@ -126,6 +126,83 @@ The spec is deliberately abstract: it does not model TLABs, root registration, o
 
 The `enter_native` / `leave_native` primitive is not currently in the spec; it can be thought of as a specialisation of the `parked` state (increment `parked_count_`, wait for pause to clear before resuming), with `enter_native` firing regardless of `pause_req` and `leave_native` gated on `!pause_req`. Extending `stw.tla` with explicit native actions is a natural next step if the API grows interesting corner cases.
 
+## Generational collection
+
+Phase 3c adds a young generation on top of the mark-sweep-evacuate core. `dustman::minor_collect()` is a STW copy-evacuating nursery collect, complementing the full `dustman::collect()`. Minor cycles touch only young blocks (plus a dirty-card scan of old blocks and a full sweep of huge); major cycles still touch everything.
+
+### Generations and the block tag
+
+Each `BlockHeader` carries a one-byte `generation` field: `Young` or `Old`. `HugeRecord`s have no explicit tag and are treated as "always Old" for the purposes of minor. Fresh user allocations land in `Young` blocks; `minor_collect` copy-evacuates survivors into `Old` blocks. Major collect is currently generation-agnostic — its evac targets stay in the default (`Young`) generation, which is why the spec calls out major-vs-generational interplay as a follow-on.
+
+`acquire_block(flags, gen)` is the single point that stamps a block's generation. Inside the allocator path, the thread-local `alloc_target_gen_` (default `Young`) determines the gen for fresh blocks; `minor_collect` toggles it to `Old` for the evac phase and restores it after.
+
+### Write barrier
+
+Every `gc_ptr<T>` copy/move constructor, copy/move assignment, and nullptr assignment calls `detail::gc_write_barrier(this)`. The barrier:
+
+1. Masks the slot address down to the 32 KiB `block_alignment` to find the containing block base.
+2. Looks up the base in `block_set_` (a `std::unordered_set<uintptr_t>` guarded by a `std::shared_mutex`, read-mostly).
+3. If the base is registered, sets a byte in the block's `card_map` indexed by the slot's line (one card per 256 B line, matching `line_map`). If the base is not registered, the slot is on the stack / in a root / in a global — the barrier skips silently.
+
+The barrier is unconditional on slot generation: we don't check whether the destination block is Old before marking. The branch would cost more than the occasional wasted card-write on a Young block, and the minor collector only reads Old-block cards, so Young marks are harmless.
+
+The collector's own pointer writes — `gc_ptr_base::store` in the UpdateVisitor, and the raw `memcpy` during evacuation — bypass the barrier. This is correct: cards only need to track *mutator* stores between collects.
+
+A thread-safe block-base set makes the barrier slow (50–100 ns per write) compared to a reserved-VA-arena design (~1–2 cycles). The trade is correctness-first for v1; future work is to mmap a contiguous heap arena so the containment check collapses to a single `addr - heap_base < heap_size`.
+
+### Card table
+
+`BlockHeader::card_map` is a flat array of `line_map_bytes` (= 128) bytes alongside `line_map`. `card_map[i] != 0` means "a mutator stored into a gc_ptr field somewhere in line `i` of this block since the last collect." After a minor collect clears every block's card_map, any subsequent dirty card was produced by a store during the intervening mutator work.
+
+Cards are conservative. A dirty card means "at least one store happened here," not "there is currently a live old → young reference here." The collector rescans the whole card; any stale refs are harmless (pointers to already-dead young become null-iffed via their own forwarding, or simply aren't followed).
+
+`BlockHeader`'s alignment bumped from 128 to `line_size` (256) so that `card_map`'s 128 bytes keep `block_header_size` a multiple of `line_size`. `lines_per_block` drops from 123 to 122 — a one-line hit.
+
+### Minor collect pipeline
+
+```
+idle ──minor_collect()──▶ marking ──worklist drained──▶ sweeping ──reclaim done──▶ idle
+```
+
+In `sweeping` the steps are simpler than major's:
+
+1. **Clear marks on young blocks** (only). Old-block marks are left alone — minor doesn't touch them.
+2. **Mark phase.** `MinorMarkVisitor` is called on every registered root, every `gc_ptr` field of every live object in an old block whose containing card is dirty, and every `gc_ptr` field of every huge object. The visitor marks only Young pointees (skipping Old and Huge) and traces transitively through the young mark worklist.
+3. **Evacuate.** TLABs are retired; `alloc_target_gen_` flips to `Old`; `alloc_skip_recycle_` is set so the evac path won't pop from `small_recycle_` (which contains Young blocks). `evacuate_block` is called on each young block in the pre-mark snapshot; `acquire_block` appends fresh old targets to `minor_evac_targets_` for the update phase.
+4. **Update phase.** `MinorUpdateVisitor` is called on the same root set plus the newly-created old blocks. For each gc_ptr it reads: if the pointee is forwarded, rewrite to the new body; otherwise leave alone. No transitive walk is needed because every slot that *could* contain a forwarded young reference is reached directly (roots, dirty old-block cards, huge bodies, new evac target objects).
+5. **Finalize.** `free_young_blocks_and_clear_cards` destroys non-forwarded (dead) objects in each young block via `destroy_non_forwarded_in`, frees the block memory, and clears `card_map` on every surviving block.
+
+Young blocks are always freed after minor — their contents have either been evacuated or died. Any future young allocations come from fresh `acquire_block(..., Young)` calls.
+
+### Minor-collect invariants
+
+**`BarrierInvariant`:** at every mutator store into a `gc_ptr<T>`, if the destination slot lives in an Old block, that block's `card_map` entry for the slot's line is set. Verified by `specs/gen.tla` (`old_refs_young \subseteq dirty`).
+
+**`PostMinorNoYoungLive`:** after `minor_collect` returns, no Young block remains in the heap. All survivors have been copied to Old blocks.
+
+**`CardResetPostMinor`:** after `minor_collect` returns, every remaining block's `card_map` is zero.
+
+**`SmallRecycleYoungOnly`:** the small recycle list contains only Young blocks. Fresh user allocations pop from it; minor evac does not. This is what keeps the user-alloc / minor-evac generations disjoint despite a shared recycle pool.
+
+### Interaction with major collect
+
+For v1, `collect()` is unchanged. Its evac targets default to the current `alloc_target_gen_` (= `Young`), so post-major, retained blocks mix the two generations: any block that was Old stays Old, any sparse block becomes a fresh Young evac target. Running `minor_collect` on that mixed state works — the minor collector treats every Young block as nursery regardless of its lineage — but the memory shape is suboptimal (long-lived data that happened to fit in a sparse block gets re-tenured on the next minor).
+
+Promoting everything on major is a natural follow-on and fits under the same `alloc_target_gen_` plumbing.
+
+### Implementation-to-spec mapping (gen.tla)
+
+`specs/gen.tla` models only the barrier invariant; other concerns (pipeline phases, STW) are covered by `collect.tla` and `stw.tla`.
+
+| TLA+ action | Implementation |
+|---|---|
+| `MutatorStoreOldToYoung(o)` | `gc_ptr<T>::operator=` / copy ctor / move ctor → `detail::gc_write_barrier(this)` → `h->card_map[line] = 1` |
+| `MutatorOverwriteToOld(o)` | same write-barrier path (the barrier is unconditional on ref generation) |
+| `BeginMinor` | `minor_collect()` through the mark phase |
+| `EndMinor` | `free_young_blocks_and_clear_cards` — the atomic card/young reset |
+
+The spec is abstract at block granularity: it has no notion of individual slots, live-object filtering, or huge records. Those are implementation concerns that the C++ test suite checks (`tests/test_minor.cpp`).
+
 ## Failure modes and how we catch them
 
 | # | Failure | Effect | Detection |
@@ -143,6 +220,10 @@ The `enter_native` / `leave_native` primitive is not currently in the spec; it c
 | 11 | Mutator thread-local TLAB not retired before park | Collector frees a block the still-valid TLAB cursor points into → UAF after resume | `safepoint_slow` zeros both TLABs before parking. The collector cannot reach another thread's TLS, so this has to be done mutator-side. |
 | 12 | Thread exits without calling `detach_thread()` | `all_thread_roots_` holds a dangling pointer into destroyed TLS; next collect dereferences it | Documented contract: threads must `detach_thread()` before exit. Not runtime-enforced. |
 | 13 | Mutator never calls `safepoint()` and never hits an allocator slow path | Collector starves, cycle never progresses | Liveness, not safety — spec does not currently prove it. Allocator slow paths poll `safepoint()` for free; pure compute loops are a consumer responsibility. |
+| 14 | Write barrier skipped on some `gc_ptr<T>` store path | Old → Young reference untracked; minor collector misses the young object and frees it under a live old slot | The barrier is in every `gc_ptr<T>::operator=` / copy ctor / move ctor (except the primitive raw-slot `store()` used only by the collector). Spec variant (`MutatorStoreOldToYoungNoBarrier` in `specs/gen.tla`) reproduces the bug in a two-state TLC counterexample. |
+| 15 | Card table cleared at the *start* of minor instead of the end | Collector enters minor with `dirty = {}` while live old → young refs exist; all newly-young becomes unreachable and is freed | `minor_collect` clears `card_map` in `free_young_blocks_and_clear_cards` after the update phase. Spec variant (`BeginMinorClearsDirty`) reproduces the bug in a three-state counterexample. |
+| 16 | Small recycle list contains Old blocks after a minor collect | Fresh user allocation pops an Old block and places a young-meant object into it; the next minor tries to evacuate that old block's contents as if they were young | `Heap::finalize_sweep` and `Heap::free_specific_blocks_and_clear_all_cards` filter to `generation == Young` when rebuilding `small_recycle_`. Regression-tested by the "preserves a young object reachable via old → young" case in `tests/test_minor.cpp`. |
+| 17 | Minor evac target block selected from the young recycle list | Young-meant block acquires old survivor data; the subsequent minor treats it as young and loses the old data | `minor_collect` sets `alloc_skip_recycle_ = true` before the evac phase, forcing `alloc_slow_small` to go directly to `alloc_fresh_small_block`. |
 
 ## Consumer contract
 
@@ -160,11 +241,12 @@ Runtime-detectable violations of this contract abort.
 
 ## Formal model
 
-Two TLA+ specs cover the two state machines that have non-trivial between-phase invariants:
+Three TLA+ specs cover the state machines that have non-trivial between-phase invariants:
 
 - [`specs/collect.tla`](../specs/collect.tla) — `collect()`'s inner pipeline (marking / classify / evacuate / update / finalize). Verified by TLC against `NoSelfEvacuation` and `RecycleCleanDuringEvac`. Landed alongside phase 3b-ii after a recycle-list-survives-into-evacuation bug produced a cascading self-iteration in the evacuator.
 - [`specs/stw.tla`](../specs/stw.tla) — phase 3.5 safepoint protocol. Verified against `NoRunningDuringCollect`, `UniqueCollector`, `PauseFlagCoherent`. Covers attach/detach lifecycle, collector-identity serialisation via the `collector = NoCollector` guard, and the attach-during-pause case.
+- [`specs/gen.tla`](../specs/gen.tla) — phase 3c generational write-barrier invariant. Verified against `BarrierInvariant` (`old_refs_young \subseteq dirty`). Narrower than the other two by design: the collection pipeline is already covered by `collect.tla` and the STW protocol by `stw.tla`, so `gen.tla` focuses exclusively on what the write barrier must guarantee.
 
-Both specs ship negative-path sanity-check variants (documented in [`specs/README.md`](../specs/README.md)) — flipping one load-bearing action guard produces a TLC counterexample in seconds. The "Implementation-to-spec mapping" subsection above names the correspondence between TLA+ actions and the C++ code; when the code changes, that table is the first place to check whether the spec still models reality.
+All three specs ship negative-path sanity-check variants (documented in [`specs/README.md`](../specs/README.md)) — flipping one load-bearing action guard produces a TLC counterexample in seconds. The "Implementation-to-spec mapping" subsections above name the correspondence between TLA+ actions and the C++ code; when the code changes, those tables are the first place to check whether the spec still models reality.
 
-Future phases extend the specs rather than replace them — phase 4 concurrent mark will land with its own TLA+ spec covering the tri-color / write-barrier protocol, per the commitment in [`docs/design.md`](design.md).
+Future phases extend the specs rather than replace them — phase 4 concurrent mark will land with its own TLA+ spec covering the tri-color protocol on top of the card-table barrier, per the commitment in [`docs/design.md`](design.md).
