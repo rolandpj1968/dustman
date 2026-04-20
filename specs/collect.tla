@@ -60,9 +60,9 @@ TypeOK ==
   /\ evacuated_srcs \subseteq Blocks
   /\ target_blocks \subseteq Blocks
 
-(************************************************************************  *)
+(***************************************************************************)
 (* Initial state.  Recycle may be non-empty from a prior collect cycle.    *)
-(************************************************************************  *)
+(***************************************************************************)
 Init ==
   /\ phase = "idle"
   /\ flagged = {}
@@ -70,9 +70,9 @@ Init ==
   /\ target_blocks = {}
   /\ recycle \in SUBSET Blocks
 
-(************************************************************************  *)
+(***************************************************************************)
 (* Phase transitions.                                                      *)
-(************************************************************************  *)
+(***************************************************************************)
 
 StartCollect ==
   /\ phase = "idle"
@@ -84,12 +84,12 @@ MarkDone ==
   /\ phase' = "classifying"
   /\ UNCHANGED <<flagged, recycle, evacuated_srcs, target_blocks>>
 
-(************************************************************************  *)
+(***************************************************************************)
 (* Classify: flag some subset of blocks for evacuation.  Clearing the      *)
 (* recycle list here is the load-bearing step -- without it, the           *)
 (* evacuation phase can re-acquire a flagged block as an allocation        *)
 (* target.                                                                 *)
-(************************************************************************  *)
+(***************************************************************************)
 ClassifyAndClearRecycle(to_flag) ==
   /\ phase = "classifying"
   /\ to_flag \subseteq Blocks
@@ -104,12 +104,12 @@ ClassifyAndClearRecycle(to_flag) ==
   /\ phase' = "evacuating"
   /\ UNCHANGED <<evacuated_srcs, target_blocks>>
 
-(************************************************************************  *)
+(***************************************************************************)
 (* Alternative Classify that does NOT clear the recycle list.  Unused in   *)
 (* Next below; documents the negative-path scenario.  Swapping             *)
 (* ClassifyAndClearRecycle for this in Next produces an invariant          *)
 (* violation -- the bug we hit in phase 3b-ii.                             *)
-(************************************************************************  *)
+(***************************************************************************)
 ClassifyWithoutClearingRecycle(to_flag) ==
   /\ phase = "classifying"
   /\ to_flag \subseteq Blocks
@@ -118,7 +118,7 @@ ClassifyWithoutClearingRecycle(to_flag) ==
   /\ phase' = "evacuating"
   /\ UNCHANGED <<recycle, evacuated_srcs, target_blocks>>
 
-(************************************************************************  *)
+(***************************************************************************)
 (* Evacuate one source block.  The target is selected by alloc_slow_       *)
 (* small: if the recycle list is non-empty, pop from it; otherwise         *)
 (* acquire a fresh block not in flagged.                                   *)
@@ -127,7 +127,7 @@ ClassifyWithoutClearingRecycle(to_flag) ==
 (* NOT filter out flagged blocks.  If the recycle list were to contain     *)
 (* a flagged block, that block would be returned, producing the            *)
 (* cascading bug that motivates this spec.                                 *)
-(************************************************************************  *)
+(***************************************************************************)
 EvacuateSource(src, tgt) ==
   /\ phase = "evacuating"
   /\ src \in flagged
@@ -150,12 +150,12 @@ UpdateDone ==
   /\ phase' = "finalizing"
   /\ UNCHANGED <<flagged, recycle, evacuated_srcs, target_blocks>>
 
-(************************************************************************  *)
+(***************************************************************************)
 (* Finalize: free all flagged blocks, rebuild the recycle list from        *)
 (* survivors.  The new recycle list may include target blocks (they held   *)
 (* evacuation copies but are otherwise ordinary blocks) but must not       *)
 (* include any flagged block since those are freed.                        *)
-(************************************************************************  *)
+(***************************************************************************)
 Finalize(new_recycle) ==
   /\ phase = "finalizing"
   /\ new_recycle \subseteq (Blocks \ flagged)
@@ -176,9 +176,9 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
-(************************************************************************  *)
+(***************************************************************************)
 (* Safety properties.                                                      *)
-(************************************************************************  *)
+(***************************************************************************)
 
 NoSelfEvacuation ==
   (phase = "evacuating") => (target_blocks \cap flagged = {})

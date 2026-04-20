@@ -87,13 +87,13 @@ Attached(m) == mut_state[m] # "detached"
 NonCollectorAttachedAllParked ==
   \A m \in Mutators: (Attached(m) /\ m # collector) => mut_state[m] = "parked"
 
-(************************************************************************  *)
+(***************************************************************************)
 (* Attach / detach.  A detached thread joining during a pause transitions  *)
 (* directly to "parked"; joining at any other time transitions to          *)
 (* "running".  Detach is only allowed from "running" -- the collector      *)
 (* cannot detach mid-cycle, and parked threads are blocked inside          *)
 (* safepoint() until released.                                             *)
-(************************************************************************  *)
+(***************************************************************************)
 MutatorAttach(m) ==
   /\ mut_state[m] = "detached"
   /\ mut_state' = [mut_state EXCEPT
@@ -106,12 +106,12 @@ MutatorDetach(m) ==
   /\ mut_state' = [mut_state EXCEPT ![m] = "detached"]
   /\ UNCHANGED <<col_state, pause_req, collector>>
 
-(************************************************************************  *)
+(***************************************************************************)
 (* Mutator safepoint protocol.  A running mutator polls pause_req at its   *)
 (* next safepoint and parks if set; a parked mutator resumes only once     *)
 (* pause_req is cleared.  The collector itself never parks -- m #          *)
 (* collector on MutatorSafepoint -- otherwise every cycle deadlocks.       *)
-(************************************************************************  *)
+(***************************************************************************)
 MutatorSafepoint(m) ==
   /\ mut_state[m] = "running"
   /\ pause_req = TRUE
@@ -125,14 +125,14 @@ MutatorResume(m) ==
   /\ mut_state' = [mut_state EXCEPT ![m] = "running"]
   /\ UNCHANGED <<col_state, pause_req, collector>>
 
-(************************************************************************  *)
+(***************************************************************************)
 (* Collector actions.  RequestPause serialises via collector =             *)
 (* NoCollector; if two threads race to collect, one becomes the            *)
 (* collector and the other falls through to MutatorSafepoint at its        *)
 (* next poll.  BeginCollect fires only once every attached non-collector   *)
 (* is parked.  EndCollect atomically clears pause_req and releases the     *)
 (* collector slot.                                                         *)
-(************************************************************************  *)
+(***************************************************************************)
 CollectorRequestPause(m) ==
   /\ mut_state[m] = "running"
   /\ col_state = "idle"
@@ -168,9 +168,9 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
-(************************************************************************  *)
+(***************************************************************************)
 (* Safety properties.                                                      *)
-(************************************************************************  *)
+(***************************************************************************)
 
 NoRunningDuringCollect ==
   (col_state = "collecting") =>
