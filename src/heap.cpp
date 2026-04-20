@@ -104,18 +104,26 @@ void safepoint_slow() noexcept {
 }
 
 bool acquire_collector_slot() noexcept {
-  std::unique_lock<std::mutex> lk(stw_mu_);
-  if (has_collector_) {
-    ++parked_count_;
-    stw_cv_.notify_all();
-    stw_cv_.wait(lk, [] { return !has_collector_; });
-    --parked_count_;
-    return false;
+  {
+    std::unique_lock<std::mutex> lk(stw_mu_);
+    if (!has_collector_) {
+      has_collector_ = true;
+      pause_requested_.store(true, std::memory_order_release);
+      stw_cv_.wait(lk, [] { return parked_count_ + 1 >= attached_count_; });
+      return true;
+    }
   }
-  has_collector_ = true;
-  pause_requested_.store(true, std::memory_order_release);
-  stw_cv_.wait(lk, [] { return parked_count_ + 1 >= attached_count_; });
-  return true;
+  // Another thread is the collector. Park like a mutator: retire TLABs
+  // first so the active collector is free to reclaim any block we were
+  // allocating into.
+  small_tlab = {};
+  medium_tlab = {};
+  std::unique_lock<std::mutex> lk(stw_mu_);
+  ++parked_count_;
+  stw_cv_.notify_all();
+  stw_cv_.wait(lk, [] { return !has_collector_; });
+  --parked_count_;
+  return false;
 }
 
 void release_collector_slot() noexcept {

@@ -1,4 +1,6 @@
+#include <atomic>
 #include <cstddef>
+#include <thread>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -174,4 +176,35 @@ TEST_CASE("major collect after minor still works", "[minor]") {
   MLeaf* after_major = r.get();
   REQUIRE(after_major != nullptr);
   REQUIRE(after_major->v == 55);
+}
+
+TEST_CASE("concurrent minor_collect callers serialise under STW", "[minor][stw]") {
+  std::atomic<int> done {0};
+
+  auto worker = [&done] {
+    dustman::attach_thread();
+    for (int i = 0; i < 20; ++i) {
+      dustman::Root<MLeaf> r {dustman::alloc<MLeaf>()};
+      r->v = i;
+      if ((i & 3) == 0) dustman::minor_collect();
+    }
+    ++done;
+    dustman::detach_thread();
+  };
+
+  std::thread t1 {worker};
+  std::thread t2 {worker};
+
+  for (int i = 0; i < 20; ++i) {
+    dustman::Root<MLeaf> r {dustman::alloc<MLeaf>()};
+    r->v = i * 100;
+    if ((i & 3) == 0) dustman::minor_collect();
+  }
+
+  dustman::enter_native();
+  t1.join();
+  t2.join();
+  dustman::leave_native();
+
+  REQUIRE(done.load() == 2);
 }
