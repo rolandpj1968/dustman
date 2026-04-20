@@ -10,9 +10,11 @@ Formal specs of dustman's state machines, maintained alongside the code.
   phase 3b-ii.
 - **`collect.cfg`** — TLC configuration for `collect.tla`.
 - **`stw.tla`** — phase 3.5 safepoint protocol. Models mutator threads
-  polling a pause flag and parking, and a collector that enters its
-  sweep only once every mutator is parked. Invariants:
-  `NoRunningDuringCollect` and `PauseFlagCoherent`.
+  polling a pause flag and parking, attach/detach lifecycle, and
+  collector identity (any running thread can call collect(); the first
+  wins via the `collector = NoCollector` guard, others fall through to
+  a safepoint park). Invariants: `NoRunningDuringCollect`,
+  `UniqueCollector`, `PauseFlagCoherent`.
 - **`stw.cfg`** — TLC configuration for `stw.tla` (three mutator threads).
 
 ## Running
@@ -47,10 +49,19 @@ violated.
 
 ### Sanity-checking the STW spec
 
-Edit `stw.tla`, replace `CollectorBeginCollect`'s `AllParked` guard with
-`TRUE`. Rerun TLC. It produces a three-state counterexample where the
-collector enters "collecting" while every mutator is still running,
-violating `NoRunningDuringCollect`.
+Two negative-path edits exercise different pieces of the protocol:
+
+ 1. Replace `CollectorBeginCollect`'s `NonCollectorAttachedAllParked`
+    guard with `TRUE`. TLC produces a five-state counterexample where
+    the collector enters "collecting" while an attached mutator is
+    still running — violating `NoRunningDuringCollect`.
+
+ 2. Change `MutatorAttach` to unconditionally transition to `"running"`
+    (ignoring `pause_req`). TLC produces a counterexample where a
+    thread attaches mid-cycle, goes straight to running while the
+    collector is in "collecting", and violates the same invariant.
+    This is a classic STW mistake: on attach during a pause, the new
+    thread must join the parked cohort.
 
 ## When to write a new spec
 
