@@ -79,13 +79,14 @@ enum class Generation : std::uint8_t {
   Old,
 };
 
-struct alignas(128) BlockHeader {
+struct alignas(line_size) BlockHeader {
   std::uint32_t flags = 0;
   std::uint32_t live_count = 0;
   Generation generation = Generation::Young;
   std::array<std::uint8_t, bitmap_bytes> mark_bitmap {};
   std::array<std::uint8_t, bitmap_bytes> start_bitmap {};
   std::array<std::uint8_t, line_map_bytes> line_map {};
+  std::array<std::uint8_t, line_map_bytes> card_map {};
 };
 
 inline constexpr std::size_t block_header_size = sizeof(BlockHeader);
@@ -189,6 +190,10 @@ std::size_t heap_block_count() noexcept;
 
 bool acquire_collector_slot() noexcept;
 void release_collector_slot() noexcept;
+
+bool is_heap_block_base(std::uintptr_t base) noexcept;
+void register_heap_block_base(std::uintptr_t base) noexcept;
+void unregister_heap_block_base(std::uintptr_t base) noexcept;
 
 [[noreturn]] void fatal_oom() noexcept;
 [[noreturn]] void fatal_reentrant_collect() noexcept;

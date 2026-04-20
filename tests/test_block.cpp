@@ -20,9 +20,9 @@ struct Small {
 template <>
 struct dustman::Tracer<Small> : dustman::FieldList<Small> {};
 
-TEST_CASE("BlockHeader is 128-aligned and sized for line-aligned body", "[block]") {
-  STATIC_REQUIRE(alignof(dustman::detail::BlockHeader) == 128);
-  STATIC_REQUIRE(sizeof(dustman::detail::BlockHeader) % 128 == 0);
+TEST_CASE("BlockHeader is line-aligned and sized for line-aligned body", "[block]") {
+  STATIC_REQUIRE(alignof(dustman::detail::BlockHeader) == dustman::detail::line_size);
+  STATIC_REQUIRE(sizeof(dustman::detail::BlockHeader) % dustman::detail::line_size == 0);
   STATIC_REQUIRE(dustman::detail::block_header_size % dustman::detail::line_size == 0);
 }
 

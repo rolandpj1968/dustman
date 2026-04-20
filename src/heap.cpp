@@ -6,6 +6,8 @@
 #include <cstring>
 #include <mutex>
 #include <new>
+#include <shared_mutex>
+#include <unordered_set>
 #include <vector>
 
 #include "dustman/gc_ptr.hpp"
@@ -38,11 +40,42 @@ bool has_collector_ = false;
 std::mutex roots_mu_;
 std::vector<ThreadRootSet*> all_thread_roots_;
 
+std::shared_mutex block_set_mu_;
+std::unordered_set<std::uintptr_t> block_set_;
+
 bool pause_is_set() noexcept {
   return pause_requested_.load(std::memory_order_acquire);
 }
 
 } // namespace
+
+bool is_heap_block_base(std::uintptr_t base) noexcept {
+  std::shared_lock<std::shared_mutex> lk(block_set_mu_);
+  return block_set_.find(base) != block_set_.end();
+}
+
+void register_heap_block_base(std::uintptr_t base) noexcept {
+  std::unique_lock<std::shared_mutex> lk(block_set_mu_);
+  block_set_.insert(base);
+}
+
+void unregister_heap_block_base(std::uintptr_t base) noexcept {
+  std::unique_lock<std::shared_mutex> lk(block_set_mu_);
+  block_set_.erase(base);
+}
+
+void gc_write_barrier(void* slot) noexcept {
+  auto addr = reinterpret_cast<std::uintptr_t>(slot);
+  auto base = addr & ~(block_alignment - 1);
+  if (!is_heap_block_base(base)) return;
+  auto* h = reinterpret_cast<BlockHeader*>(base);
+  auto body = base + block_header_size;
+  if (addr < body) return;
+  auto card_idx = (addr - body) / line_size;
+  if (card_idx < h->card_map.size()) {
+    h->card_map[card_idx] = 1;
+  }
+}
 
 [[noreturn]] void fatal_oom() noexcept {
   std::abort();
@@ -196,6 +229,7 @@ public:
     new (h) BlockHeader {};
     h->flags = flags;
     h->generation = gen;
+    register_heap_block_base(reinterpret_cast<std::uintptr_t>(block));
     return block;
   }
 
@@ -470,6 +504,7 @@ Heap::classify_and_destroy_dead(std::uint32_t threshold_percent) noexcept {
     auto* h = static_cast<BlockHeader*>(block);
     if (!block_has_any_mark(h)) {
       destroy_all_objects_in(h);
+      unregister_heap_block_base(reinterpret_cast<std::uintptr_t>(block));
       return true;
     }
     std::size_t live = compute_live_bytes(h);
@@ -495,6 +530,7 @@ void Heap::finalize_sweep() noexcept {
     auto* h = static_cast<BlockHeader*>(block);
     if ((h->flags & flag_block_evacuating) != 0) {
       destroy_non_forwarded_in(h);
+      unregister_heap_block_base(reinterpret_cast<std::uintptr_t>(block));
       std::free(block);
       return true;
     }
