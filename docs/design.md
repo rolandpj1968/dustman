@@ -236,6 +236,19 @@ Implementation follows a pragmatic migration path, but the API and header layout
 
 The public API should not shift meaningfully across these phases.
 
+### Status
+
+Landed:
+- **Phase 1–2** — arena allocator, mark-sweep, precise tracing via `Tracer<T>`, reentrancy guard.
+- **Phase 3a** — line-aware small allocator, recycle list, medium tier, huge side-table, over-alignment routing.
+- **Phase 3b** — opportunistic evacuation with forwarding pointers and `UpdateVisitor`; formal [`specs/collect.tla`](../specs/collect.tla).
+- **Phase 3.5** — multi-mutator stop-the-world with formal [`specs/stw.tla`](../specs/stw.tla): safepoint protocol, attach/detach lifecycle, collector-identity serialisation, `enter_native` / `leave_native` for external blocks, fast-path safepoint in `alloc<T>`.
+
+Remaining:
+- **Phase 3c** — generational (nursery + tenured) under the existing moving infrastructure.
+- **Phase 4** — concurrent / incremental marking with write barriers (own TLA+ spec planned).
+- **Deferred topics** (below): parallel STW, thread-local young generation.
+
 ### Deferred: parallel STW collection
 
 Between serial STW (phase 3.5) and concurrent (phase 4) sits **parallel STW**: the collector itself uses N threads during the pause. Mutators are still parked, so no write barrier or tri-color invariants — just work-stealing over mark, evacuation, classify, and finalize. Payoff order is mark ≫ evacuate > tail; mark dominates on real heaps.

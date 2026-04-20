@@ -49,9 +49,9 @@ violated.
 
 ### Sanity-checking the STW spec
 
-Two negative-path edits exercise different pieces of the protocol:
+Three negative-path edits exercise different pieces of the protocol:
 
- 1. Replace `CollectorBeginCollect`'s `NonCollectorAttachedAllParked`
+ 1. Replace `CollectorBeginCollect`'s `NonCollectorAttachedNotRunning`
     guard with `TRUE`. TLC produces a five-state counterexample where
     the collector enters "collecting" while an attached mutator is
     still running — violating `NoRunningDuringCollect`.
@@ -62,6 +62,12 @@ Two negative-path edits exercise different pieces of the protocol:
     collector is in "collecting", and violates the same invariant.
     This is a classic STW mistake: on attach during a pause, the new
     thread must join the parked cohort.
+
+ 3. Drop the `pause_req = FALSE` guard from `MutatorLeaveNative`. TLC
+    finds a seven-step counterexample where a thread leaves native
+    back to running while the collector is still in "collecting".
+    `leave_native` must wait for the in-flight cycle to finish before
+    returning to mutator code.
 
 ## When to write a new spec
 

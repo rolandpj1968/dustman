@@ -10,12 +10,20 @@
 (* models that coordination and proves the safety invariants the           *)
 (* implementation needs to maintain.                                       *)
 (*                                                                         *)
-(* Threads are modelled as a fixed set Mutators, each in one of three      *)
+(* Threads are modelled as a fixed set Mutators, each in one of four       *)
 (* lifecycle states:                                                       *)
 (*                                                                         *)
 (*   detached  thread is not attached; invisible to the collector          *)
 (*   running   attached, executing mutator code                            *)
 (*   parked    attached, waiting at a safepoint for the pause to clear     *)
+(*   native    attached, blocked in external code (syscall, join, ...)     *)
+(*                                                                         *)
+(* From the collector's POV, "parked" and "native" are equivalent: both    *)
+(* count toward the "all non-collectors not running" wait predicate.  The  *)
+(* difference is the transition back to running -- a parked mutator is     *)
+(* waiting inside safepoint() and resumes automatically when the collector *)
+(* clears the pause, while a native mutator resumes when the consumer      *)
+(* calls leave_native, gated on !pause_req so it cannot race the collector.*)
 (*                                                                         *)
 (* Any running mutator can call collect() and thereby become the           *)
 (* collector.  The scalar variable `collector` holds its id (or            *)
@@ -47,12 +55,15 @@
 (* Run with TLC using the companion stw.cfg.  Sanity-check negative        *)
 (* paths (see specs/README.md):                                            *)
 (*                                                                         *)
-(*   1. Replace CollectorBeginCollect's NonCollectorAttachedAllParked      *)
+(*   1. Replace CollectorBeginCollect's NonCollectorAttachedNotRunning     *)
 (*      guard with TRUE -- NoRunningDuringCollect violated in a few        *)
-(*      steps.                                                              *)
+(*      steps.                                                             *)
 (*   2. Make MutatorAttach unconditionally transition to "running"         *)
 (*      (ignoring pause_req) -- NoRunningDuringCollect violated when a     *)
 (*      thread attaches mid-cycle.                                         *)
+(*   3. Drop the pause_req = FALSE guard from MutatorLeaveNative -- a      *)
+(*      thread returns from native to running alongside an in-flight       *)
+(*      collector, violating NoRunningDuringCollect.                       *)
 (***************************************************************************)
 
 EXTENDS Integers, FiniteSets
@@ -60,14 +71,14 @@ EXTENDS Integers, FiniteSets
 CONSTANTS Mutators, NoCollector
 
 VARIABLES
-  mut_state,    \* function Mutators -> {"detached", "running", "parked"}
+  mut_state,    \* function Mutators -> MutStates
   col_state,    \* one of {"idle", "waiting", "collecting"}
   pause_req,    \* BOOLEAN
   collector     \* Mutators \cup {NoCollector}
 
 vars == <<mut_state, col_state, pause_req, collector>>
 
-MutStates == {"detached", "running", "parked"}
+MutStates == {"detached", "running", "parked", "native"}
 ColStates == {"idle", "waiting", "collecting"}
 
 TypeOK ==
@@ -84,8 +95,10 @@ Init ==
 
 Attached(m) == mut_state[m] # "detached"
 
-NonCollectorAttachedAllParked ==
-  \A m \in Mutators: (Attached(m) /\ m # collector) => mut_state[m] = "parked"
+NotRunning(m) == mut_state[m] \in {"detached", "parked", "native"}
+
+NonCollectorAttachedNotRunning ==
+  \A m \in Mutators: (Attached(m) /\ m # collector) => NotRunning(m)
 
 (***************************************************************************)
 (* Attach / detach.  A detached thread joining during a pause transitions  *)
@@ -126,6 +139,24 @@ MutatorResume(m) ==
   /\ UNCHANGED <<col_state, pause_req, collector>>
 
 (***************************************************************************)
+(* Native-state transition.  enter_native is a running thread voluntarily  *)
+(* declaring itself not-running-dustman (about to block in a syscall,      *)
+(* join, lock, etc.); leave_native is the return, gated on !pause_req so   *)
+(* a thread never returns to running alongside an in-flight collector.     *)
+(***************************************************************************)
+MutatorEnterNative(m) ==
+  /\ mut_state[m] = "running"
+  /\ m # collector
+  /\ mut_state' = [mut_state EXCEPT ![m] = "native"]
+  /\ UNCHANGED <<col_state, pause_req, collector>>
+
+MutatorLeaveNative(m) ==
+  /\ mut_state[m] = "native"
+  /\ pause_req = FALSE
+  /\ mut_state' = [mut_state EXCEPT ![m] = "running"]
+  /\ UNCHANGED <<col_state, pause_req, collector>>
+
+(***************************************************************************)
 (* Collector actions.  RequestPause serialises via collector =             *)
 (* NoCollector; if two threads race to collect, one becomes the            *)
 (* collector and the other falls through to MutatorSafepoint at its        *)
@@ -145,7 +176,7 @@ CollectorRequestPause(m) ==
 CollectorBeginCollect ==
   /\ col_state = "waiting"
   /\ collector # NoCollector
-  /\ NonCollectorAttachedAllParked
+  /\ NonCollectorAttachedNotRunning
   /\ col_state' = "collecting"
   /\ UNCHANGED <<pause_req, mut_state, collector>>
 
@@ -162,6 +193,8 @@ Next ==
   \/ \E m \in Mutators: MutatorDetach(m)
   \/ \E m \in Mutators: MutatorSafepoint(m)
   \/ \E m \in Mutators: MutatorResume(m)
+  \/ \E m \in Mutators: MutatorEnterNative(m)
+  \/ \E m \in Mutators: MutatorLeaveNative(m)
   \/ \E m \in Mutators: CollectorRequestPause(m)
   \/ CollectorBeginCollect
   \/ CollectorEndCollect
@@ -174,7 +207,7 @@ Spec == Init /\ [][Next]_vars
 
 NoRunningDuringCollect ==
   (col_state = "collecting") =>
-    \A m \in Mutators: (Attached(m) /\ m # collector) => mut_state[m] = "parked"
+    \A m \in Mutators: (Attached(m) /\ m # collector) => mut_state[m] # "running"
 
 UniqueCollector ==
   /\ (col_state = "idle") <=> (collector = NoCollector)
