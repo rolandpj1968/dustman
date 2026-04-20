@@ -236,6 +236,20 @@ Implementation follows a pragmatic migration path, but the API and header layout
 
 The public API should not shift meaningfully across these phases.
 
+### Deferred: parallel STW collection
+
+Between serial STW (phase 3.5) and concurrent (phase 4) sits **parallel STW**: the collector itself uses N threads during the pause. Mutators are still parked, so no write barrier or tri-color invariants — just work-stealing over mark, evacuation, classify, and finalize. Payoff order is mark ≫ evacuate > tail; mark dominates on real heaps.
+
+The bottleneck is not atomic mark-bit CAS (uncontended atomic OR is ~10-20 cycles vs ~100-300 for the cache miss to load the object) but **cache-line bouncing on shared bitmaps**. Mitigation: work-steal at block granularity rather than object, so different threads touch different bitmaps. Expect ~0.7-0.9× per-thread efficiency, saturating at memory bandwidth (usually 4-8 cores desktop, more on NUMA).
+
+Phase 3.5 (serial STW) is a prerequisite; parallel extends it phase-by-phase without changing heap layout — the existing `UniqueCollector` invariant still holds (one *logical* cycle), and workers would warrant their own phase-barrier sub-spec.
+
+### Deferred: thread-local young generation
+
+Per-thread nurseries are a clean win when the consumer commits to an isolation story (Ractor-style: no shared mutable state, or only via explicit channels); one thread's young-gen collects without touching others'. Under classical shared-memory semantics the remembered-set bookkeeping needed to handle cross-thread young-gen pointers tends to eat most of the locality benefit.
+
+Middle ground, which the current TLAB design already supports structurally: **shared nursery with per-thread TLABs**. Allocation locality lands for free; collection is still global. Revisit the per-thread-nursery question once Frozone's concurrency model is pinned down.
+
 ## Testing and verification
 
 Garbage collectors fail in asymmetric, hard-to-reproduce ways:
