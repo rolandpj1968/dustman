@@ -185,7 +185,7 @@ public:
     return h;
   }
 
-  void* acquire_block(std::uint32_t flags) {
+  void* acquire_block(std::uint32_t flags, Generation gen) {
     std::lock_guard<std::mutex> lock(mu_);
     void* block = std::aligned_alloc(block_alignment, block_size);
     if (block == nullptr) {
@@ -195,6 +195,7 @@ public:
     auto* h = static_cast<BlockHeader*>(block);
     new (h) BlockHeader {};
     h->flags = flags;
+    h->generation = gen;
     return block;
   }
 
@@ -436,13 +437,14 @@ void* claim_line(BlockHeader* h, std::size_t line, std::size_t size) noexcept {
 }
 
 void* alloc_fresh_small_block(std::size_t size) {
-  auto* block = static_cast<std::byte*>(Heap::instance().acquire_block(0));
+  auto* block = static_cast<std::byte*>(Heap::instance().acquire_block(0, Generation::Young));
   BlockHeader* h = reinterpret_cast<BlockHeader*>(block);
   return claim_line(h, 0, size);
 }
 
 void* alloc_fresh_medium_block(std::size_t size) {
-  auto* block = static_cast<std::byte*>(Heap::instance().acquire_block(flag_block_medium));
+  auto* block = static_cast<std::byte*>(
+      Heap::instance().acquire_block(flag_block_medium, Generation::Young));
   auto* body = block + block_header_size;
 
   medium_tlab.cursor = body + size;

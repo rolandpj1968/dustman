@@ -74,9 +74,15 @@ enum class GcState : std::uint8_t {
 
 inline GcState gc_state = GcState::idle;
 
+enum class Generation : std::uint8_t {
+  Young,
+  Old,
+};
+
 struct alignas(128) BlockHeader {
   std::uint32_t flags = 0;
   std::uint32_t live_count = 0;
+  Generation generation = Generation::Young;
   std::array<std::uint8_t, bitmap_bytes> mark_bitmap {};
   std::array<std::uint8_t, bitmap_bytes> start_bitmap {};
   std::array<std::uint8_t, line_map_bytes> line_map {};
