@@ -30,6 +30,18 @@ struct BadlyTraced {
   dustman::gc_ptr<Leaf> untraced;
 };
 
+// Threshold=0 disables evacuation so the pre-evacuation semantics these
+// tests rely on (unmarked objects stay at their original address) hold.
+struct NoEvacGuard {
+  std::uint32_t saved;
+  NoEvacGuard() : saved(dustman::get_evacuation_threshold_percent()) {
+    dustman::set_evacuation_threshold_percent(0);
+  }
+  ~NoEvacGuard() {
+    dustman::set_evacuation_threshold_percent(saved);
+  }
+};
+
 } // namespace
 
 template <>
@@ -56,6 +68,7 @@ TEST_CASE("collect marks a single rooted object", "[collect]") {
 }
 
 TEST_CASE("collect does not mark unrooted objects", "[collect]") {
+  NoEvacGuard g;
   dustman::Root<Leaf> r {dustman::alloc<Leaf>()};
   dustman::gc_ptr<Leaf> orphan = dustman::alloc<Leaf>();
 
@@ -78,6 +91,7 @@ TEST_CASE("collect follows tracer into gc_ptr fields", "[collect]") {
 }
 
 TEST_CASE("collect terminates on cyclic object graphs", "[collect]") {
+  NoEvacGuard g;
   dustman::Root<Cyclic> r {dustman::alloc<Cyclic>()};
   auto other = dustman::alloc<Cyclic>();
   r->next = other;
@@ -111,6 +125,7 @@ TEST_CASE("clear_all_marks wipes every block's mark bitmap", "[collect]") {
 }
 
 TEST_CASE("collect un-marks objects that became unreachable between cycles", "[collect]") {
+  NoEvacGuard g;
   dustman::Root<Leaf> r {dustman::alloc<Leaf>()};
   void* addr = nullptr;
   {
@@ -126,6 +141,7 @@ TEST_CASE("collect un-marks objects that became unreachable between cycles", "[c
 }
 
 TEST_CASE("buggy tracer: missed field's pointee is left unmarked", "[collect]") {
+  NoEvacGuard g;
   dustman::Root<BadlyTraced> r {dustman::alloc<BadlyTraced>()};
   r->traced = dustman::alloc<Leaf>();
   r->untraced = dustman::alloc<Leaf>();

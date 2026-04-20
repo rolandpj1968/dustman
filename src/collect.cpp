@@ -98,6 +98,13 @@ void collect() noexcept {
   if (detail::collecting_) {
     detail::fatal_reentrant_collect();
   }
+
+  detail::ensure_attached();
+
+  if (!detail::acquire_collector_slot()) {
+    return;
+  }
+
   detail::collecting_ = true;
   detail::gc_state = detail::GcState::marking;
 
@@ -131,6 +138,7 @@ void collect() noexcept {
 
   detail::gc_state = detail::GcState::idle;
   detail::collecting_ = false;
+  detail::release_collector_slot();
 }
 
 } // namespace dustman

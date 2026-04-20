@@ -12,12 +12,28 @@ namespace dustman {
 
 class Visitor;
 
-inline void safepoint() noexcept {}
-inline void attach_thread() noexcept {}
-inline void detach_thread() noexcept {}
+namespace detail {
+inline std::atomic<bool> pause_requested_ {false};
+extern thread_local bool attached_;
+
+void safepoint_slow() noexcept;
+} // namespace detail
+
+inline void safepoint() noexcept {
+  if (detail::pause_requested_.load(std::memory_order_acquire)) {
+    detail::safepoint_slow();
+  }
+}
+
+void attach_thread() noexcept;
+void detach_thread() noexcept;
 
 namespace detail {
 inline std::atomic<std::uint32_t> evacuation_threshold_percent_ {25};
+
+inline void ensure_attached() noexcept {
+  if (!attached_) attach_thread();
+}
 }
 
 inline void set_evacuation_threshold_percent(std::uint32_t p) noexcept {
@@ -161,6 +177,9 @@ void finalize_sweep() noexcept;
 
 void clear_all_marks() noexcept;
 std::size_t heap_block_count() noexcept;
+
+bool acquire_collector_slot() noexcept;
+void release_collector_slot() noexcept;
 
 [[noreturn]] void fatal_oom() noexcept;
 [[noreturn]] void fatal_reentrant_collect() noexcept;

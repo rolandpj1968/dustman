@@ -17,6 +17,7 @@ add_executable(dustman_tests
   test_forwarding.cpp
   test_gc_ptr.cpp
   test_huge.cpp
+  test_isolation.cpp
   test_medium.cpp
   test_recycle.cpp
   test_root.cpp

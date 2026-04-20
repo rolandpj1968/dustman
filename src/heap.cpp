@@ -1,6 +1,7 @@
 #include "dustman/heap.hpp"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -16,8 +17,31 @@ namespace dustman::detail {
 thread_local Tlab small_tlab;
 thread_local Tlab medium_tlab;
 
-thread_local std::vector<gc_ptr_base*> root_slots_;
-thread_local std::vector<std::size_t> root_free_;
+struct ThreadRootSet {
+  std::vector<gc_ptr_base*> slots;
+  std::vector<std::size_t> free_slots;
+};
+
+thread_local ThreadRootSet my_roots_;
+
+thread_local bool attached_ = false;
+
+namespace {
+
+std::mutex stw_mu_;
+std::condition_variable stw_cv_;
+std::size_t attached_count_ = 0;
+std::size_t parked_count_ = 0;
+bool has_collector_ = false;
+
+std::mutex roots_mu_;
+std::vector<ThreadRootSet*> all_thread_roots_;
+
+bool pause_is_set() noexcept {
+  return pause_requested_.load(std::memory_order_acquire);
+}
+
+} // namespace
 
 [[noreturn]] void fatal_oom() noexcept {
   std::abort();
@@ -26,6 +50,87 @@ thread_local std::vector<std::size_t> root_free_;
 [[noreturn]] void fatal_reentrant_collect() noexcept {
   std::abort();
 }
+
+void safepoint_slow() noexcept {
+  if (collecting_) return;
+  if (!attached_) return;
+  small_tlab = {};
+  medium_tlab = {};
+  std::unique_lock<std::mutex> lk(stw_mu_);
+  if (!pause_is_set()) return;
+  ++parked_count_;
+  stw_cv_.notify_all();
+  stw_cv_.wait(lk, [] { return !pause_is_set(); });
+  --parked_count_;
+}
+
+bool acquire_collector_slot() noexcept {
+  std::unique_lock<std::mutex> lk(stw_mu_);
+  if (has_collector_) {
+    ++parked_count_;
+    stw_cv_.notify_all();
+    stw_cv_.wait(lk, [] { return !has_collector_; });
+    --parked_count_;
+    return false;
+  }
+  has_collector_ = true;
+  pause_requested_.store(true, std::memory_order_release);
+  stw_cv_.wait(lk, [] { return parked_count_ + 1 >= attached_count_; });
+  return true;
+}
+
+void release_collector_slot() noexcept {
+  std::unique_lock<std::mutex> lk(stw_mu_);
+  has_collector_ = false;
+  pause_requested_.store(false, std::memory_order_release);
+  stw_cv_.notify_all();
+}
+
+} // namespace dustman::detail
+
+namespace dustman {
+
+void attach_thread() noexcept {
+  if (detail::attached_) return;
+  {
+    std::lock_guard<std::mutex> rlk(detail::roots_mu_);
+    detail::all_thread_roots_.push_back(&detail::my_roots_);
+  }
+  std::unique_lock<std::mutex> lk(detail::stw_mu_);
+  ++detail::attached_count_;
+  detail::attached_ = true;
+  if (detail::pause_is_set()) {
+    ++detail::parked_count_;
+    detail::stw_cv_.notify_all();
+    detail::stw_cv_.wait(lk, [] { return !detail::pause_is_set(); });
+    --detail::parked_count_;
+  }
+}
+
+void detach_thread() noexcept {
+  if (!detail::attached_) return;
+  detail::small_tlab = {};
+  detail::medium_tlab = {};
+  {
+    std::unique_lock<std::mutex> lk(detail::stw_mu_);
+    --detail::attached_count_;
+    detail::attached_ = false;
+    detail::stw_cv_.notify_all();
+  }
+  {
+    std::lock_guard<std::mutex> rlk(detail::roots_mu_);
+    auto it = std::find(detail::all_thread_roots_.begin(),
+                        detail::all_thread_roots_.end(),
+                        &detail::my_roots_);
+    if (it != detail::all_thread_roots_.end()) {
+      detail::all_thread_roots_.erase(it);
+    }
+  }
+}
+
+} // namespace dustman
+
+namespace dustman::detail {
 
 namespace {
 
@@ -418,6 +523,8 @@ void evacuate_block(BlockHeader* h) {
 }
 
 void* alloc_slow_small(std::size_t size) {
+  ensure_attached();
+  safepoint();
   BlockHeader* current = (small_tlab.cursor != nullptr) ? header_of(small_tlab.cursor) : nullptr;
 
   if (current != nullptr) {
@@ -438,10 +545,14 @@ void* alloc_slow_small(std::size_t size) {
 }
 
 void* alloc_slow_medium(std::size_t size) {
+  ensure_attached();
+  safepoint();
   return alloc_fresh_medium_block(size);
 }
 
 void* alloc_huge(std::size_t obj_bytes, std::size_t align) {
+  ensure_attached();
+  safepoint();
   return Heap::instance().acquire_huge(obj_bytes, align);
 }
 
@@ -478,30 +589,34 @@ std::size_t heap_block_count() noexcept {
 }
 
 std::size_t register_root_slot(gc_ptr_base* p) noexcept {
-  if (!root_free_.empty()) {
-    std::size_t slot = root_free_.back();
-    root_free_.pop_back();
-    root_slots_[slot] = p;
+  ensure_attached();
+  if (!my_roots_.free_slots.empty()) {
+    std::size_t slot = my_roots_.free_slots.back();
+    my_roots_.free_slots.pop_back();
+    my_roots_.slots[slot] = p;
     return slot;
   }
-  std::size_t slot = root_slots_.size();
-  root_slots_.push_back(p);
+  std::size_t slot = my_roots_.slots.size();
+  my_roots_.slots.push_back(p);
   return slot;
 }
 
 void unregister_root_slot(std::size_t slot) noexcept {
-  root_slots_[slot] = nullptr;
-  root_free_.push_back(slot);
+  my_roots_.slots[slot] = nullptr;
+  my_roots_.free_slots.push_back(slot);
 }
 
 void update_root_slot(std::size_t slot, gc_ptr_base* p) noexcept {
-  root_slots_[slot] = p;
+  my_roots_.slots[slot] = p;
 }
 
 void visit_roots(Visitor& v) noexcept {
-  for (gc_ptr_base* entry : root_slots_) {
-    if (entry != nullptr) {
-      v.visit(*entry);
+  std::lock_guard<std::mutex> lk(roots_mu_);
+  for (ThreadRootSet* trs : all_thread_roots_) {
+    for (gc_ptr_base* entry : trs->slots) {
+      if (entry != nullptr) {
+        v.visit(*entry);
+      }
     }
   }
 }
