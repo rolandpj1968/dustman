@@ -257,6 +257,14 @@ The bottleneck is not atomic mark-bit CAS (uncontended atomic OR is ~10-20 cycle
 
 Phase 3.5 (serial STW) is a prerequisite; parallel extends it phase-by-phase without changing heap layout — the existing `UniqueCollector` invariant still holds (one *logical* cycle), and workers would warrant their own phase-barrier sub-spec.
 
+### Deferred: small/medium tier boundary
+
+The current small/medium boundary is `line_size` (256 B). Objects in roughly 121–248 B take exactly one 256 B line each (a second wouldn't fit with the 8 B header), wasting up to ~50% of the line. A 132 B workload caps block occupancy at ~52%.
+
+Proposed fix: move the boundary to `line_size / 2` (120 B with header). Everything the small tier still handles fits ≥ 2 per line; everything above routes to the medium tier's whole-block bump, which packs densely (132 B → ~94% block occupancy). The tradeoff is that medium doesn't participate in the line recycle list, but for sizes in this range "recycle a line" is 1:1 with an object anyway — evacuation does the same net reclamation when density drops below threshold.
+
+Minor plumbing work: derive the boundary from `line_size` in one place rather than encoding two independent constants, so the two move together if we ever retune line size. Not urgent; bundle with the next tier-boundary touch.
+
 ### Deferred: thread-local young generation
 
 Per-thread nurseries are a clean win when the consumer commits to an isolation story (Ractor-style: no shared mutable state, or only via explicit channels); one thread's young-gen collects without touching others'. Under classical shared-memory semantics the remembered-set bookkeeping needed to handle cross-thread young-gen pointers tends to eat most of the locality benefit.
