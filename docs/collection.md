@@ -94,7 +94,19 @@ The thread-local `collecting_` flag serves a second duty under STW: it is the "I
 
 ### Liveness
 
-The spec does not currently prove liveness, and the implementation inherits that gap: a mutator in a tight loop without any `safepoint()` calls and without hitting an allocator slow path will starve the collector indefinitely. `alloc_slow_small`, `alloc_slow_medium`, and `alloc_huge` all poll `safepoint()` on entry, so workloads with any non-trivial allocation rate naturally reach a safepoint; but pure compute loops are the consumer's responsibility to instrument.
+The spec does not currently prove liveness, and the implementation inherits that gap: a mutator in a tight loop without any `safepoint()` calls and without hitting an allocator slow path will starve the collector indefinitely. Allocation-heavy workloads reach safepoints naturally; pure compute loops are the consumer's responsibility to instrument.
+
+### Pause-responsiveness policy
+
+Dustman takes a tiered approach, with the cost/risk shape of each mechanism deciding whether it's baked in, opt-in, or left to the consumer.
+
+- **Fast-path safepoint (baked in).** `alloc<T>` calls `safepoint()` on every call, including the TLAB-bump fast path. Cost is one relaxed atomic load plus one predicted-not-taken branch (~1-2 cycles on x86/ARM64, ≲0.1 % of a realistic allocator-heavy workload). Closes the "tight TLAB-bump loop" starvation case completely. Cheap enough that making it optional would cost more in code complexity than it saves at runtime.
+- **Slow-path safepoint (baked in).** `alloc_slow_small`, `alloc_slow_medium`, `alloc_huge` each poll on entry. Load-bearing for the case where an attach happens on first slow path and `ensure_attached()` needs to park a new thread during a pause.
+- **Signal-based nudge (planned, opt-in).** An API along the lines of `dustman::enable_signal_preempt(signum)` would install a handler on demand; the handler sets a TLS flag that the mutator checks at its next safepoint. Opt-in because signal delivery has real portability and correctness implications: consumer-owned signal handlers, freestanding contexts without signals, third-party libraries that mask signals. Not load-bearing for correctness — strictly a responsiveness nudge.
+- **`enter_native()` / `leave_native()` (planned, primitive).** Consumer wraps blocking syscalls, `std::thread::join`, long external waits. Between `enter_native` and `leave_native` the thread counts as parked from the protocol's POV, so the collector doesn't block waiting for it. Not a policy — just a primitive the consumer calls at points only the consumer knows about.
+- **Explicit `safepoint()` in long non-allocating loops (consumer contract).** Documented, not enforced. Pure compute loops, tracer-like walks in consumer code.
+
+The philosophy: bake in things that are cheap and universally correct; expose primitives for things the consumer must drive at specific points; opt-in things that have real downsides. Signal-based *preemption* of arbitrary consumer code (HotSpot's polling-page trick, `mprotect` + `SIGSEGV` handler) is out of scope — it needs compiler cooperation to place polls at known-safe instructions, which we don't have for hand-written C++.
 
 ### Implementation-to-spec mapping
 

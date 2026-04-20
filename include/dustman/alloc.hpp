@@ -16,6 +16,8 @@ gc_ptr<T> alloc(Args&&... args) {
     detail::fatal_reentrant_collect();
   }
 
+  safepoint();
+
   constexpr std::size_t size = detail::object_bytes<T>();
   constexpr std::uint32_t flags = detail::compute_type_flags<T>();
 
