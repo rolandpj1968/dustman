@@ -161,6 +161,9 @@ extern thread_local Tlab small_tlab;
 extern thread_local Tlab medium_tlab;
 
 extern thread_local bool collecting_;
+extern thread_local Generation alloc_target_gen_;
+extern thread_local bool alloc_skip_recycle_;
+extern thread_local std::vector<BlockHeader*>* minor_evac_targets_;
 
 inline void* tlab_bump(Tlab& tlab, std::size_t size) noexcept {
   std::byte* cursor = tlab.cursor;
@@ -184,6 +187,12 @@ std::size_t huge_count() noexcept;
 std::vector<BlockHeader*> classify_and_destroy_dead(std::uint32_t threshold_percent) noexcept;
 void evacuate_block(BlockHeader* h);
 void finalize_sweep() noexcept;
+
+std::vector<BlockHeader*> collect_young_blocks() noexcept;
+void visit_dirty_cards_of_old_blocks(::dustman::Visitor& v) noexcept;
+void visit_all_huge(::dustman::Visitor& v) noexcept;
+void visit_block_live_objects(BlockHeader* h, ::dustman::Visitor& v) noexcept;
+void free_young_blocks_and_clear_cards(const std::vector<BlockHeader*>& youngs) noexcept;
 
 void clear_all_marks() noexcept;
 std::size_t heap_block_count() noexcept;

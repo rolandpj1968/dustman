@@ -19,6 +19,10 @@ namespace dustman::detail {
 thread_local Tlab small_tlab;
 thread_local Tlab medium_tlab;
 
+thread_local Generation alloc_target_gen_ = Generation::Young;
+thread_local bool alloc_skip_recycle_ = false;
+thread_local std::vector<BlockHeader*>* minor_evac_targets_ = nullptr;
+
 struct ThreadRootSet {
   std::vector<gc_ptr_base*> slots;
   std::vector<std::size_t> free_slots;
@@ -230,6 +234,9 @@ public:
     h->flags = flags;
     h->generation = gen;
     register_heap_block_base(reinterpret_cast<std::uintptr_t>(block));
+    if (minor_evac_targets_ != nullptr && gen == Generation::Old) {
+      minor_evac_targets_->push_back(h);
+    }
     return block;
   }
 
@@ -305,6 +312,19 @@ public:
     std::lock_guard<std::mutex> lock(mu_);
     return huge_records_.size();
   }
+
+  void visit_all_huge(::dustman::Visitor& v) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto& rec : huge_records_) {
+      void* body = static_cast<std::byte*>(rec.hdr) + sizeof(const TypeInfo*);
+      if (is_forwarded(body)) continue;
+      const TypeInfo* ti = type_of(body);
+      ti->trace(body, v);
+    }
+  }
+
+  void free_specific_blocks_and_clear_all_cards(
+      const std::vector<BlockHeader*>& to_free) noexcept;
 
   template <typename F>
   void for_each_block(F&& f) {
@@ -471,14 +491,15 @@ void* claim_line(BlockHeader* h, std::size_t line, std::size_t size) noexcept {
 }
 
 void* alloc_fresh_small_block(std::size_t size) {
-  auto* block = static_cast<std::byte*>(Heap::instance().acquire_block(0, Generation::Young));
+  auto* block =
+      static_cast<std::byte*>(Heap::instance().acquire_block(0, alloc_target_gen_));
   BlockHeader* h = reinterpret_cast<BlockHeader*>(block);
   return claim_line(h, 0, size);
 }
 
 void* alloc_fresh_medium_block(std::size_t size) {
   auto* block = static_cast<std::byte*>(
-      Heap::instance().acquire_block(flag_block_medium, Generation::Young));
+      Heap::instance().acquire_block(flag_block_medium, alloc_target_gen_));
   auto* body = block + block_header_size;
 
   medium_tlab.cursor = body + size;
@@ -546,6 +567,31 @@ void Heap::finalize_sweep() noexcept {
   }
 }
 
+void Heap::free_specific_blocks_and_clear_all_cards(
+    const std::vector<BlockHeader*>& to_free) noexcept {
+  std::lock_guard<std::mutex> lock(mu_);
+  small_recycle_.clear();
+  std::unordered_set<BlockHeader*> set(to_free.begin(), to_free.end());
+  auto new_end = std::remove_if(blocks_.begin(), blocks_.end(), [&set](void* block) {
+    auto* h = static_cast<BlockHeader*>(block);
+    if (set.find(h) != set.end()) {
+      destroy_non_forwarded_in(h);
+      unregister_heap_block_base(reinterpret_cast<std::uintptr_t>(block));
+      std::free(block);
+      return true;
+    }
+    return false;
+  });
+  blocks_.erase(new_end, blocks_.end());
+  for (void* block : blocks_) {
+    auto* h = static_cast<BlockHeader*>(block);
+    h->card_map.fill(0);
+    if (!is_medium_block(h) && block_has_any_free_line(h)) {
+      small_recycle_.push_back(h);
+    }
+  }
+}
+
 void evacuate_block(BlockHeader* h) {
   const bool medium = is_medium_block(h);
   auto* block_base = reinterpret_cast<std::byte*>(h);
@@ -595,10 +641,12 @@ void* alloc_slow_small(std::size_t size) {
     }
   }
 
-  BlockHeader* recycled = Heap::instance().pop_small_recycled();
-  if (recycled != nullptr) {
-    std::size_t line = find_free_line_in(recycled, 0);
-    return claim_line(recycled, line, size);
+  if (!alloc_skip_recycle_) {
+    BlockHeader* recycled = Heap::instance().pop_small_recycled();
+    if (recycled != nullptr) {
+      std::size_t line = find_free_line_in(recycled, 0);
+      return claim_line(recycled, line, size);
+    }
   }
 
   return alloc_fresh_small_block(size);
@@ -642,6 +690,66 @@ void finalize_sweep() noexcept {
 
 void clear_all_marks() noexcept {
   Heap::instance().for_each_block([](BlockHeader* h) { h->mark_bitmap.fill(0); });
+}
+
+std::vector<BlockHeader*> collect_young_blocks() noexcept {
+  std::vector<BlockHeader*> out;
+  Heap::instance().for_each_block([&out](BlockHeader* h) {
+    if (h->generation == Generation::Young) {
+      out.push_back(h);
+    }
+  });
+  return out;
+}
+
+void visit_block_live_objects(BlockHeader* h, ::dustman::Visitor& v) noexcept {
+  auto* block_base = reinterpret_cast<std::byte*>(h);
+  auto* body_start = block_base + block_header_size;
+  for (std::size_t slot = 0; slot < max_slots_per_block; ++slot) {
+    std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+    if ((h->start_bitmap[slot / 8] & mask) == 0) continue;
+    if ((h->mark_bitmap[slot / 8] & mask) == 0) continue;
+    auto* body_addr = body_start + slot * slot_bytes;
+    if (is_forwarded(body_addr)) continue;
+    const TypeInfo* ti = type_of(body_addr);
+    ti->trace(body_addr, v);
+  }
+}
+
+void visit_dirty_cards_of_old_blocks(::dustman::Visitor& v) noexcept {
+  Heap::instance().for_each_block([&v](BlockHeader* h) {
+    if (h->generation != Generation::Old) return;
+    bool any_dirty = false;
+    for (std::size_t i = 0; i < h->card_map.size(); ++i) {
+      if (h->card_map[i] != 0) { any_dirty = true; break; }
+    }
+    if (!any_dirty) return;
+    auto* block_base = reinterpret_cast<std::byte*>(h);
+    auto* body_start = block_base + block_header_size;
+    for (std::size_t line = 0; line < lines_per_block; ++line) {
+      if (h->card_map[line] == 0) continue;
+      std::size_t slot_lo = (line * line_size) / slot_bytes;
+      std::size_t slot_hi = ((line + 1) * line_size) / slot_bytes;
+      if (slot_hi > max_slots_per_block) slot_hi = max_slots_per_block;
+      for (std::size_t slot = slot_lo; slot < slot_hi; ++slot) {
+        std::uint8_t mask = std::uint8_t(1) << (slot % 8);
+        if ((h->start_bitmap[slot / 8] & mask) == 0) continue;
+        if ((h->mark_bitmap[slot / 8] & mask) == 0) continue;
+        auto* body_addr = body_start + slot * slot_bytes;
+        if (is_forwarded(body_addr)) continue;
+        const TypeInfo* ti = type_of(body_addr);
+        ti->trace(body_addr, v);
+      }
+    }
+  });
+}
+
+void visit_all_huge(::dustman::Visitor& v) noexcept {
+  Heap::instance().visit_all_huge(v);
+}
+
+void free_young_blocks_and_clear_cards(const std::vector<BlockHeader*>& youngs) noexcept {
+  Heap::instance().free_specific_blocks_and_clear_all_cards(youngs);
 }
 
 std::size_t heap_block_count() noexcept {
