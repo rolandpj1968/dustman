@@ -33,3 +33,6 @@ core
 specs/states/
 specs/*_TTrace_*.bin
 specs/*_TTrace_*.tla
+
+# Ad-hoc bug repro / scratch directory — not part of the library
+bug/

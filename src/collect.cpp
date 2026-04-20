@@ -1,5 +1,6 @@
 #include "dustman/collect.hpp"
 
+#include <algorithm>
 #include <unordered_set>
 #include <vector>
 
@@ -174,6 +175,14 @@ void collect() noexcept {
   detail::finalize_sweep();
   detail::sweep_huge();
 
+  detail::bytes_since_last_minor_.store(0, std::memory_order_relaxed);
+  detail::needs_major_.store(false, std::memory_order_relaxed);
+  std::size_t current_old = detail::count_old_block_bytes();
+  std::uint32_t factor = detail::major_growth_factor_percent_.load(std::memory_order_relaxed);
+  std::size_t min_bytes = detail::major_min_bytes_.load(std::memory_order_relaxed);
+  std::size_t new_threshold = std::max(current_old * factor / 100, min_bytes);
+  detail::major_threshold_bytes_.store(new_threshold, std::memory_order_relaxed);
+
   detail::gc_state = detail::GcState::idle;
   detail::collecting_ = false;
   detail::release_collector_slot();
@@ -234,9 +243,29 @@ void minor_collect() noexcept {
 
   detail::free_young_blocks_and_clear_cards(young_blocks);
 
+  detail::bytes_since_last_minor_.store(0, std::memory_order_relaxed);
+  std::size_t current_old = detail::count_old_block_bytes();
+  if (current_old >= detail::major_threshold_bytes_.load(std::memory_order_relaxed)) {
+    detail::needs_major_.store(true, std::memory_order_relaxed);
+  }
+
   detail::gc_state = detail::GcState::idle;
   detail::collecting_ = false;
   detail::release_collector_slot();
 }
+
+namespace detail {
+void maybe_auto_collect() noexcept {
+  if (collecting_) return;
+  if (!auto_collect_enabled_.load(std::memory_order_relaxed)) return;
+  if (bytes_since_last_minor_.load(std::memory_order_relaxed)
+      >= minor_threshold_bytes_.load(std::memory_order_relaxed)) {
+    ::dustman::minor_collect();
+  }
+  if (needs_major_.load(std::memory_order_relaxed)) {
+    ::dustman::collect();
+  }
+}
+} // namespace detail
 
 } // namespace dustman

@@ -245,6 +245,9 @@ public:
     if (minor_evac_targets_ != nullptr && gen == Generation::Old) {
       minor_evac_targets_->push_back(h);
     }
+    if (gen == Generation::Young) {
+      bytes_since_last_minor_.fetch_add(block_body_size, std::memory_order_relaxed);
+    }
     return block;
   }
 
@@ -268,7 +271,18 @@ public:
     }
     void* hdr = static_cast<std::byte*>(base) + hdr_offset;
     huge_records_.push_back(HugeRecord {base, hdr, alloc_size, false, false});
+    huge_live_bytes_ += alloc_size;
     return hdr;
+  }
+
+  std::size_t count_old_bytes() {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::size_t count = 0;
+    for (void* block : blocks_) {
+      auto* h = static_cast<BlockHeader*>(block);
+      if (h->generation == Generation::Old) ++count;
+    }
+    return count * block_body_size + huge_live_bytes_;
   }
 
   bool mark_huge(const void* body) noexcept {
@@ -301,12 +315,13 @@ public:
 
   void sweep_huge() noexcept {
     std::lock_guard<std::mutex> lock(mu_);
-    auto new_end = std::remove_if(huge_records_.begin(), huge_records_.end(), [](HugeRecord& rec) {
+    auto new_end = std::remove_if(huge_records_.begin(), huge_records_.end(), [this](HugeRecord& rec) {
       if (!rec.marked) {
         void* body = static_cast<std::byte*>(rec.hdr) + sizeof(const TypeInfo*);
         const TypeInfo* ti = type_of(body);
         ti->destroy(body);
         std::free(rec.base);
+        huge_live_bytes_ -= rec.bytes;
         return true;
       }
       rec.marked = false;
@@ -393,6 +408,7 @@ private:
   std::vector<void*> blocks_;
   std::vector<BlockHeader*> small_recycle_;
   std::vector<HugeRecord> huge_records_;
+  std::size_t huge_live_bytes_ = 0;
 };
 
 bool block_has_any_mark(BlockHeader* h) noexcept {
@@ -638,9 +654,12 @@ void evacuate_block(BlockHeader* h) {
   }
 }
 
+void maybe_auto_collect() noexcept;
+
 void* alloc_slow_small(std::size_t size) {
   ensure_attached();
   safepoint();
+  maybe_auto_collect();
   BlockHeader* current = (small_tlab.cursor != nullptr) ? header_of(small_tlab.cursor) : nullptr;
 
   if (current != nullptr) {
@@ -665,12 +684,14 @@ void* alloc_slow_small(std::size_t size) {
 void* alloc_slow_medium(std::size_t size) {
   ensure_attached();
   safepoint();
+  maybe_auto_collect();
   return alloc_fresh_medium_block(size);
 }
 
 void* alloc_huge(std::size_t obj_bytes, std::size_t align) {
   ensure_attached();
   safepoint();
+  maybe_auto_collect();
   return Heap::instance().acquire_huge(obj_bytes, align);
 }
 
@@ -760,6 +781,10 @@ void visit_all_huge(::dustman::Visitor& v) noexcept {
 
 void free_young_blocks_and_clear_cards(const std::vector<BlockHeader*>& youngs) noexcept {
   Heap::instance().free_specific_blocks_and_clear_all_cards(youngs);
+}
+
+std::size_t count_old_block_bytes() noexcept {
+  return Heap::instance().count_old_bytes();
 }
 
 std::size_t heap_block_count() noexcept {

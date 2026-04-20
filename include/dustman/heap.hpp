@@ -48,6 +48,49 @@ inline std::uint32_t get_evacuation_threshold_percent() noexcept {
 }
 
 namespace detail {
+inline std::atomic<std::size_t> bytes_since_last_minor_ {0};
+inline std::atomic<std::size_t> minor_threshold_bytes_ {4 * 1024 * 1024};
+inline std::atomic<std::size_t> major_threshold_bytes_ {16 * 1024 * 1024};
+inline std::atomic<std::size_t> major_min_bytes_ {16 * 1024 * 1024};
+inline std::atomic<std::uint32_t> major_growth_factor_percent_ {200};
+inline std::atomic<bool> needs_major_ {false};
+inline std::atomic<bool> auto_collect_enabled_ {true};
+}
+
+inline void set_minor_threshold_bytes(std::size_t n) noexcept {
+  detail::minor_threshold_bytes_.store(n, std::memory_order_relaxed);
+}
+
+inline std::size_t get_minor_threshold_bytes() noexcept {
+  return detail::minor_threshold_bytes_.load(std::memory_order_relaxed);
+}
+
+inline void set_major_growth_factor_percent(std::uint32_t p) noexcept {
+  detail::major_growth_factor_percent_.store(p, std::memory_order_relaxed);
+}
+
+inline std::uint32_t get_major_growth_factor_percent() noexcept {
+  return detail::major_growth_factor_percent_.load(std::memory_order_relaxed);
+}
+
+inline void set_major_min_bytes(std::size_t n) noexcept {
+  detail::major_min_bytes_.store(n, std::memory_order_relaxed);
+  detail::major_threshold_bytes_.store(n, std::memory_order_relaxed);
+}
+
+inline std::size_t get_major_min_bytes() noexcept {
+  return detail::major_min_bytes_.load(std::memory_order_relaxed);
+}
+
+inline void set_auto_collect_enabled(bool enabled) noexcept {
+  detail::auto_collect_enabled_.store(enabled, std::memory_order_relaxed);
+}
+
+inline bool get_auto_collect_enabled() noexcept {
+  return detail::auto_collect_enabled_.load(std::memory_order_relaxed);
+}
+
+namespace detail {
 
 inline constexpr std::size_t block_size = 32 * 1024;
 inline constexpr std::size_t block_alignment = block_size;
@@ -193,6 +236,8 @@ void visit_dirty_cards_of_old_blocks(::dustman::Visitor& v) noexcept;
 void visit_all_huge(::dustman::Visitor& v) noexcept;
 void visit_block_live_objects(BlockHeader* h, ::dustman::Visitor& v) noexcept;
 void free_young_blocks_and_clear_cards(const std::vector<BlockHeader*>& youngs) noexcept;
+
+std::size_t count_old_block_bytes() noexcept;
 
 void clear_all_marks() noexcept;
 std::size_t heap_block_count() noexcept;

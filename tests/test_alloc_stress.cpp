@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "dustman/alloc.hpp"
+#include "dustman/heap.hpp"
 #include "dustman/tracer.hpp"
 #include "dustman/type_info.hpp"
 
@@ -21,8 +22,23 @@ struct Stress {
 template <>
 struct dustman::Tracer<Stress> : dustman::FieldList<Stress> {};
 
+// This test measures raw allocator mechanics (TypeInfo header, alignment,
+// bytes in the body).  It holds Stress* raw pointers across many allocations
+// without rooting them, which is fine for the allocator's POV but would be
+// reaped by the auto-collect policy.  Disable auto-collect for this test;
+// restore on exit.
+struct NoAutoCollectGuard {
+  bool saved;
+  NoAutoCollectGuard() : saved(dustman::get_auto_collect_enabled()) {
+    dustman::set_auto_collect_enabled(false);
+  }
+  ~NoAutoCollectGuard() { dustman::set_auto_collect_enabled(saved); }
+};
+
 TEST_CASE("arena stress: 500k allocations preserve TypeInfo, alignment, and values",
           "[alloc][stress]") {
+  NoAutoCollectGuard g;
+
   constexpr std::size_t N = 500'000;
 
   std::vector<Stress*> addrs;
