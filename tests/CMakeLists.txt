@@ -19,6 +19,7 @@ add_executable(dustman_tests
   test_huge.cpp
   test_isolation.cpp
   test_medium.cpp
+  test_minor.cpp
   test_recycle.cpp
   test_root.cpp
   test_stw.cpp

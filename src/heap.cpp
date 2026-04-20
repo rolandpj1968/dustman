@@ -561,7 +561,8 @@ void Heap::finalize_sweep() noexcept {
 
   for (void* block : blocks_) {
     auto* h = static_cast<BlockHeader*>(block);
-    if (!is_medium_block(h) && block_has_any_free_line(h)) {
+    if (!is_medium_block(h) && h->generation == Generation::Young
+        && block_has_any_free_line(h)) {
       small_recycle_.push_back(h);
     }
   }
@@ -586,7 +587,8 @@ void Heap::free_specific_blocks_and_clear_all_cards(
   for (void* block : blocks_) {
     auto* h = static_cast<BlockHeader*>(block);
     h->card_map.fill(0);
-    if (!is_medium_block(h) && block_has_any_free_line(h)) {
+    if (!is_medium_block(h) && h->generation == Generation::Young
+        && block_has_any_free_line(h)) {
       small_recycle_.push_back(h);
     }
   }
