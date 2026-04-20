@@ -244,6 +244,7 @@ Landed:
 - **Phase 3b** — opportunistic evacuation with forwarding pointers and `UpdateVisitor`; formal [`specs/collect.tla`](../specs/collect.tla).
 - **Phase 3.5** — multi-mutator stop-the-world with formal [`specs/stw.tla`](../specs/stw.tla): safepoint protocol, attach/detach lifecycle, collector-identity serialisation, `enter_native` / `leave_native` for external blocks, fast-path safepoint in `alloc<T>`.
 - **Phase 3c** — generational minor collect (`dustman::minor_collect()`) with a per-block 256 B card table and an unconditional write barrier in `gc_ptr<T>`; formal [`specs/gen.tla`](../specs/gen.tla) (`BarrierInvariant`). Major collect stays generation-agnostic — promoting-everything-on-major is a follow-on that fits under the same `alloc_target_gen_` plumbing.
+- **Phase 3d** — auto-collect policy and visibility API. Minor fires at `minor_threshold_bytes_` of young allocation (default 4 MiB); major fires when old-gen has grown by `major_growth_factor_percent_` (default 2.0x, min 16 MiB) since the last major. Consumers can tune or disable via `set_auto_collect_enabled`. `heap_stats()` + individual getters expose counts, current heap size by generation, and last-cycle pause times.
 
 Remaining:
 - **Phase 4** — concurrent / incremental marking with write barriers (own TLA+ spec planned, layered on top of the card-table barrier).

@@ -1,6 +1,6 @@
 # Collection semantics
 
-This document captures the invariants, state machine, and failure modes of dustman's collection subsystem. It grows with each phase; today it covers through phase 3c (stop-the-world mark-sweep with opportunistic evacuation, multiple mutator threads, generational minor collect). Later phases extend rather than replace.
+This document captures the invariants, state machine, and failure modes of dustman's collection subsystem. It grows with each phase; today it covers through phase 3d (stop-the-world mark-sweep with opportunistic evacuation, multiple mutator threads, generational minor collect, auto-collect policy, visibility API). Later phases extend rather than replace.
 
 ## State machine
 
@@ -189,6 +189,61 @@ Young blocks are always freed after minor — their contents have either been ev
 For v1, `collect()` is unchanged. Its evac targets default to the current `alloc_target_gen_` (= `Young`), so post-major, retained blocks mix the two generations: any block that was Old stays Old, any sparse block becomes a fresh Young evac target. Running `minor_collect` on that mixed state works — the minor collector treats every Young block as nursery regardless of its lineage — but the memory shape is suboptimal (long-lived data that happened to fit in a sparse block gets re-tenured on the next minor).
 
 Promoting everything on major is a natural follow-on and fits under the same `alloc_target_gen_` plumbing.
+
+### Auto-collect policy
+
+Dustman decides when to collect; consumers don't have to. Two thresholds are checked at the top of each `alloc_slow_*` path (after the safepoint, guarded by `collecting_` and `auto_collect_enabled_`):
+
+- **Minor trigger.** `bytes_since_last_minor_` is bumped by `block_body_size` at every young-generation `acquire_block` and by `alloc_size` at every `alloc_huge`. When it crosses `minor_threshold_bytes_` (default 4 MiB), the next `alloc_slow_*` calls `minor_collect()`. The counter resets to 0 at the end of every minor and major.
+- **Major trigger.** At the end of each `minor_collect`, `count_old_block_bytes()` (old blocks' body bytes plus live huge bytes) is compared to `major_threshold_bytes_`. If crossed, a `needs_major_` latch fires so the next `alloc_slow_*` calls `collect()`. After that major runs, `major_threshold_bytes_` is recomputed as `max(current_old × major_growth_factor_percent_ / 100, major_min_bytes_)` — defaults 200% growth, 16 MiB minimum.
+
+Net: a long-running mutator no longer needs to call `collect()` itself. Minor cycles fire at roughly 4 MiB of young allocation; major cycles fire when the old generation has doubled relative to its size at the previous major.
+
+Guards:
+
+- `collecting_` (thread-local) prevents the collector's own evac allocations from recursing into auto-trigger. Only mutator `alloc_slow_*` paths can fire an auto-collect.
+- `auto_collect_enabled_` is a global atomic bool; `set_auto_collect_enabled(false)` disables both triggers. Explicit `dustman::collect()` / `dustman::minor_collect()` still work.
+
+Tuning knobs (all `noexcept`, atomic-relaxed):
+
+```cpp
+void set_minor_threshold_bytes(std::size_t);
+void set_major_growth_factor_percent(std::uint32_t);  // 200 = 2.0x
+void set_major_min_bytes(std::size_t);
+void set_auto_collect_enabled(bool);
+```
+
+`set_major_min_bytes` also clamps the currently-active `major_threshold_bytes_` up to the new minimum, so consumers can raise the floor mid-run without waiting for a major to retune.
+
+The trigger checks are coarse (once per `alloc_slow_*`, not per `alloc<T>`), so the minor threshold can be overshot by up to one block's worth (32 KiB) before the collect fires. For the major trigger, the latch-based design means between a minor that crosses the threshold and the next `alloc_slow_*` the old generation may continue to grow — a bounded overshoot of up to one minor cycle's worth of promotion.
+
+### Visibility API
+
+Dustman maintains a small set of always-on counters for monitoring. Reading them is lock-free except for `heap_stats()`, which acquires the heap mutex briefly to snapshot block counts by generation.
+
+```cpp
+struct HeapStats {
+  std::size_t minor_count;             // total minors since process start
+  std::size_t major_count;             // total majors since process start
+  std::size_t total_bytes_allocated;   // cumulative (never resets)
+  std::size_t current_heap_bytes;      // young + old + huge, live at snapshot
+  std::size_t current_young_bytes;
+  std::size_t current_old_bytes;
+  std::size_t huge_bytes;
+  std::uint64_t last_minor_pause_us;   // STW body only, no park-wait
+  std::uint64_t last_major_pause_us;
+};
+
+HeapStats heap_stats();
+std::size_t get_minor_count();
+std::size_t get_major_count();
+std::uint64_t get_last_minor_pause_us();
+std::uint64_t get_last_major_pause_us();
+```
+
+Pause timing brackets the collect body *after* `acquire_collector_slot` and *before* `release_collector_slot`, so it measures the time the collector was actually running — not time spent waiting for other threads to park. Units are microseconds via `std::chrono::steady_clock`.
+
+`total_bytes_allocated` is cumulative (bumped at every `acquire_block` / `acquire_huge`), so delta-sampling gives an allocation rate. `current_*` fields reflect the moment `heap_stats()` was called.
 
 ### Implementation-to-spec mapping (gen.tla)
 
