@@ -16,6 +16,13 @@ Formal specs of dustman's state machines, maintained alongside the code.
   a safepoint park). Invariants: `NoRunningDuringCollect`,
   `UniqueCollector`, `PauseFlagCoherent`.
 - **`stw.cfg`** — TLC configuration for `stw.tla` (three mutator threads).
+- **`gen.tla`** — phase 3c (proposed) generational write-barrier and minor-
+  collect invariant, at block granularity. Models the single safety
+  property that matters: every live old → young reference has its source
+  card marked dirty. Narrower than `collect.tla` by design — the
+  collection pipeline and STW protocol are covered by their own specs.
+  Invariant: `BarrierInvariant`.
+- **`gen.cfg`** — TLC configuration for `gen.tla` (three blocks).
 
 ## Running
 
@@ -68,6 +75,24 @@ Three negative-path edits exercise different pieces of the protocol:
     back to running while the collector is still in "collecting".
     `leave_native` must wait for the in-flight cycle to finish before
     returning to mutator code.
+
+### Sanity-checking the gen spec
+
+Two negative-path edits exercise the write-barrier and card-reset
+invariants:
+
+ 1. Replace `MutatorStoreOldToYoung(o)` with
+    `MutatorStoreOldToYoungNoBarrier(o)` in `Next`. TLC produces a
+    two-state counterexample where an old → young reference appears
+    with no corresponding dirty card — a missed barrier, which would
+    cause the minor collector to miss the young object and free it
+    under a live old-gen slot.
+
+ 2. Replace `BeginMinor` with `BeginMinorClearsDirty` in `Next`. TLC
+    produces a three-state counterexample where the collector enters
+    `minor_collecting` with `dirty = {}` but `old_refs_young = {b3}` —
+    the dirty-card snapshot has been wiped before the collector could
+    read it, so live cross-gen refs are invisible.
 
 ## When to write a new spec
 

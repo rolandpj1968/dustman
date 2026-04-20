@@ -31,5 +31,5 @@ core
 
 # TLC model-checker artifacts
 specs/states/
-specs/collect_TTrace_*.bin
-specs/collect_TTrace_*.tla
+specs/*_TTrace_*.bin
+specs/*_TTrace_*.tla
