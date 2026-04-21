@@ -329,7 +329,6 @@ public:
     huge_records_.push_back(HugeRecord {base, hdr, alloc_size, false, false});
     huge_live_bytes_ += alloc_size;
     total_bytes_allocated_.fetch_add(alloc_size, std::memory_order_relaxed);
-    bytes_since_last_minor_.fetch_add(alloc_size, std::memory_order_relaxed);
     return hdr;
   }
 

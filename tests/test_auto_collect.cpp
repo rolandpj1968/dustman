@@ -21,6 +21,10 @@ struct ACWide {
   std::uint64_t pad[60] {};
 };
 
+struct ACHuge {
+  std::uint64_t pad[600] {};
+};
+
 struct DefaultTuning {
   std::size_t saved_minor;
   std::size_t saved_min;
@@ -46,6 +50,9 @@ struct dustman::Tracer<ACLeaf> : dustman::FieldList<ACLeaf> {};
 
 template <>
 struct dustman::Tracer<ACWide> : dustman::FieldList<ACWide> {};
+
+template <>
+struct dustman::Tracer<ACHuge> : dustman::FieldList<ACHuge> {};
 
 TEST_CASE("get_minor_count increments after explicit minor_collect", "[visibility]") {
   std::size_t before = dustman::get_minor_count();
@@ -155,4 +162,23 @@ TEST_CASE("explicit minor / major still work when auto-collect disabled",
 
   REQUIRE(dustman::get_minor_count() == minors_before + 1);
   REQUIRE(dustman::get_major_count() == majors_before + 1);
+}
+
+TEST_CASE("huge allocations don't drive the minor-collect counter",
+          "[auto-collect]") {
+  DefaultTuning g;
+
+  dustman::minor_collect();
+  std::size_t minors_before = dustman::get_minor_count();
+
+  dustman::set_auto_collect_enabled(true);
+  dustman::set_minor_threshold_bytes(1 * 1024 * 1024);
+
+  std::vector<dustman::Root<ACHuge>> keepers;
+  keepers.reserve(512);
+  for (int i = 0; i < 512; ++i) {
+    keepers.emplace_back(dustman::alloc<ACHuge>());
+  }
+
+  REQUIRE(dustman::get_minor_count() == minors_before);
 }
