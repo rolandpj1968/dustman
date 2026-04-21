@@ -245,10 +245,11 @@ Landed:
 - **Phase 3.5** — multi-mutator stop-the-world with formal [`specs/stw.tla`](../specs/stw.tla): safepoint protocol, attach/detach lifecycle, collector-identity serialisation, `enter_native` / `leave_native` for external blocks, fast-path safepoint in `alloc<T>`.
 - **Phase 3c** — generational minor collect (`dustman::minor_collect()`) with a per-block 256 B card table and an unconditional write barrier in `gc_ptr<T>`; formal [`specs/gen.tla`](../specs/gen.tla) (`BarrierInvariant`). Major collect stays generation-agnostic — promoting-everything-on-major is a follow-on that fits under the same `alloc_target_gen_` plumbing.
 - **Phase 3d** — auto-collect policy and visibility API. Minor fires at `minor_threshold_bytes_` of young allocation (default 4 MiB); major fires when old-gen has grown by `major_growth_factor_percent_` (default 2.0x, min 16 MiB) since the last major. Consumers can tune or disable via `set_auto_collect_enabled`. `heap_stats()` + individual getters expose counts, current heap size by generation, and last-cycle pause times.
+- **Phase 3e** — reserved 256 GiB mmap arena for blocks. Bump-allocate from the arena; free via free list + `madvise(MADV_DONTNEED)`. Write-barrier containment check drops from a `shared_mutex`-guarded hash lookup to a single unsigned range compare (1–2 cycles). Measured ~1.85x speedup on the Frozone splay benchmark. Also fixes the pre-existing leak in `classify_and_destroy_dead` by routing all frees through `arena_release_block`.
 
 Remaining:
 - **Phase 4** — concurrent / incremental marking with write barriers (own TLA+ spec planned, layered on top of the card-table barrier).
-- **Deferred topics** (below): parallel STW, thread-local young generation, small/medium tier boundary, reserved VA heap arena (fast barrier containment check).
+- **Deferred topics** (below): parallel STW, thread-local young generation, small/medium tier boundary.
 
 ### Deferred: parallel STW collection
 
@@ -272,15 +273,11 @@ Per-thread nurseries are a clean win when the consumer commits to an isolation s
 
 Middle ground, which the current TLAB design already supports structurally: **shared nursery with per-thread TLABs**. Allocation locality lands for free; collection is still global. Revisit the per-thread-nursery question once Frozone's concurrency model is pinned down.
 
-### Deferred: reserved VA heap arena
+### Deferred: flat card table via the VA arena
 
-Phase 3c's write barrier does a `std::shared_mutex`-guarded `std::unordered_set` lookup on every `gc_ptr<T>` store to classify the slot as in-heap vs stack/global. Cost is ~50–100 ns per write. Correct for v1 but meaningful overhead on gc_ptr-heavy workloads.
+Phase 3e landed the reserved VA arena and collapsed the barrier containment check, but cards are still per-block arrays. A flat `byte[arena_size / line_size]` indexed by `(addr - arena_base_) >> 8` would be a drop-in replacement and opens the door to SIMD card scanning (`vpmovmskb` over 16–32 cards per instruction). The per-block `card_map` in `BlockHeader` would go away, saving ~128 B per block (~0.4%) and improving locality during minor mark's dirty-card scan.
 
-The production-GC answer is a reserved contiguous virtual arena: `mmap` a large region at startup, subdivide into 32 KiB blocks from that region only. The containment check then collapses to `(addr - heap_base) < heap_size` — one subtract, one compare, branchless. The card table also becomes a flat `byte[heap_size / 256]` indexable by `(addr - heap_base) >> 8`, which opens the door to SIMD card scanning (`vpmovmskb` over 16–32 cards per instruction).
-
-Uncommitted VA is cheap on 64-bit (2^48 usable, physical pages committed on write), so a 256 GiB reservation is essentially free. Heap growth handled either by pre-sizing or by chaining additional arenas.
-
-Not urgent; the hash-set barrier is correct and the perf delta only matters under real workload measurement.
+Not urgent; phase 4 (concurrent mark) wants this for efficient remembered-set maintenance, so bundle with that.
 
 ## Testing and verification
 

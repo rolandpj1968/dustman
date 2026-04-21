@@ -148,7 +148,7 @@ The barrier is unconditional on slot generation: we don't check whether the dest
 
 The collector's own pointer writes — `gc_ptr_base::store` in the UpdateVisitor, and the raw `memcpy` during evacuation — bypass the barrier. This is correct: cards only need to track *mutator* stores between collects.
 
-A thread-safe block-base set makes the barrier slow (50–100 ns per write) compared to a reserved-VA-arena design (~1–2 cycles). The trade is correctness-first for v1; future work is to mmap a contiguous heap arena so the containment check collapses to a single `addr - heap_base < heap_size`.
+Phase 3e replaced the per-block `std::aligned_alloc` with a single 256 GiB `mmap(PROT_READ|PROT_WRITE, MAP_NORESERVE)` arena. The barrier's containment check is now a single unsigned subtract-and-compare `(addr - arena_base_) < arena_size_bytes` — 1–2 cycles, no lock, no hash lookup. Blocks bump-allocate from the arena; freed blocks go to a free list with `madvise(MADV_DONTNEED)` to release physical pages. Huge allocations stay on `std::aligned_alloc` outside the arena (the barrier's range check naturally excludes them).
 
 ### Card table
 
