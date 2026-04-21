@@ -284,8 +284,6 @@ bool acquire_collector_slot() noexcept;
 void release_collector_slot() noexcept;
 
 bool is_heap_block_base(std::uintptr_t base) noexcept;
-void register_heap_block_base(std::uintptr_t base) noexcept;
-void unregister_heap_block_base(std::uintptr_t base) noexcept;
 
 [[noreturn]] void fatal_oom() noexcept;
 [[noreturn]] void fatal_reentrant_collect() noexcept;

@@ -1,12 +1,13 @@
 #include "dustman/heap.hpp"
 
+#include <sys/mman.h>
+
 #include <algorithm>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <new>
-#include <shared_mutex>
 #include <unordered_set>
 #include <vector>
 
@@ -44,8 +45,55 @@ bool has_collector_ = false;
 std::mutex roots_mu_;
 std::vector<ThreadRootSet*> all_thread_roots_;
 
-std::shared_mutex block_set_mu_;
-std::unordered_set<std::uintptr_t> block_set_;
+// Reserved VA arena.  At first use, mmap a large PROT_READ|PROT_WRITE
+// MAP_NORESERVE region; all block_alignment-aligned blocks come from it via
+// a bump allocator plus a free list.  Physical pages are demand-paged by
+// the kernel on first write; freed blocks are returned via madvise
+// MADV_DONTNEED.  The write-barrier containment check collapses from a
+// shared_mutex-guarded hash lookup (~50-100 ns) to a single unsigned
+// subtract-and-compare (1-2 cycles).
+constexpr std::size_t arena_size_bytes = std::size_t {256} * 1024 * 1024 * 1024;
+std::uintptr_t arena_base_ = 0;
+std::atomic<std::size_t> arena_bump_offset_ {0};
+std::mutex arena_mu_;
+std::vector<std::uintptr_t> arena_free_list_;
+
+void arena_init_once() noexcept {
+  static std::once_flag flag;
+  std::call_once(flag, [] {
+    const std::size_t reserve = arena_size_bytes + block_alignment;
+    void* raw = ::mmap(nullptr, reserve, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (raw == MAP_FAILED) {
+      std::abort();
+    }
+    auto raw_addr = reinterpret_cast<std::uintptr_t>(raw);
+    arena_base_ = (raw_addr + block_alignment - 1) & ~(block_alignment - 1);
+  });
+}
+
+void* arena_acquire_block() noexcept {
+  arena_init_once();
+  {
+    std::lock_guard<std::mutex> lk(arena_mu_);
+    if (!arena_free_list_.empty()) {
+      auto addr = arena_free_list_.back();
+      arena_free_list_.pop_back();
+      return reinterpret_cast<void*>(addr);
+    }
+  }
+  std::size_t offset = arena_bump_offset_.fetch_add(block_size, std::memory_order_relaxed);
+  if (offset + block_size > arena_size_bytes) {
+    std::abort();
+  }
+  return reinterpret_cast<void*>(arena_base_ + offset);
+}
+
+void arena_release_block(void* block) noexcept {
+  ::madvise(block, block_size, MADV_DONTNEED);
+  std::lock_guard<std::mutex> lk(arena_mu_);
+  arena_free_list_.push_back(reinterpret_cast<std::uintptr_t>(block));
+}
 
 bool pause_is_set() noexcept {
   return pause_requested_.load(std::memory_order_acquire);
@@ -54,18 +102,7 @@ bool pause_is_set() noexcept {
 } // namespace
 
 bool is_heap_block_base(std::uintptr_t base) noexcept {
-  std::shared_lock<std::shared_mutex> lk(block_set_mu_);
-  return block_set_.find(base) != block_set_.end();
-}
-
-void register_heap_block_base(std::uintptr_t base) noexcept {
-  std::unique_lock<std::shared_mutex> lk(block_set_mu_);
-  block_set_.insert(base);
-}
-
-void unregister_heap_block_base(std::uintptr_t base) noexcept {
-  std::unique_lock<std::shared_mutex> lk(block_set_mu_);
-  block_set_.erase(base);
+  return (base - arena_base_) < arena_size_bytes;
 }
 
 struct HeapSnapshotOut {
@@ -254,16 +291,12 @@ public:
 
   void* acquire_block(std::uint32_t flags, Generation gen) {
     std::lock_guard<std::mutex> lock(mu_);
-    void* block = std::aligned_alloc(block_alignment, block_size);
-    if (block == nullptr) {
-      fatal_oom();
-    }
+    void* block = arena_acquire_block();
     blocks_.push_back(block);
     auto* h = static_cast<BlockHeader*>(block);
     new (h) BlockHeader {};
     h->flags = flags;
     h->generation = gen;
-    register_heap_block_base(reinterpret_cast<std::uintptr_t>(block));
     if (minor_evac_targets_ != nullptr && gen == Generation::Old) {
       minor_evac_targets_->push_back(h);
     }
@@ -407,7 +440,7 @@ public:
     auto new_end = std::remove_if(blocks_.begin(), blocks_.end(), [&pred](void* block) {
       auto* h = static_cast<BlockHeader*>(block);
       if (pred(h)) {
-        std::free(block);
+        arena_release_block(block);
         return true;
       }
       return false;
@@ -592,7 +625,7 @@ Heap::classify_and_destroy_dead(std::uint32_t threshold_percent) noexcept {
     auto* h = static_cast<BlockHeader*>(block);
     if (!block_has_any_mark(h)) {
       destroy_all_objects_in(h);
-      unregister_heap_block_base(reinterpret_cast<std::uintptr_t>(block));
+      arena_release_block(block);
       return true;
     }
     std::size_t live = compute_live_bytes(h);
@@ -618,8 +651,7 @@ void Heap::finalize_sweep() noexcept {
     auto* h = static_cast<BlockHeader*>(block);
     if ((h->flags & flag_block_evacuating) != 0) {
       destroy_non_forwarded_in(h);
-      unregister_heap_block_base(reinterpret_cast<std::uintptr_t>(block));
-      std::free(block);
+      arena_release_block(block);
       return true;
     }
     return false;
@@ -644,8 +676,7 @@ void Heap::free_specific_blocks_and_clear_all_cards(
     auto* h = static_cast<BlockHeader*>(block);
     if (set.find(h) != set.end()) {
       destroy_non_forwarded_in(h);
-      unregister_heap_block_base(reinterpret_cast<std::uintptr_t>(block));
-      std::free(block);
+      arena_release_block(block);
       return true;
     }
     return false;
