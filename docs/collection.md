@@ -186,15 +186,20 @@ Young blocks are always freed after minor — their contents have either been ev
 
 ### Interaction with major collect
 
-For v1, `collect()` is unchanged. Its evac targets default to the current `alloc_target_gen_` (= `Young`), so post-major, retained blocks mix the two generations: any block that was Old stays Old, any sparse block becomes a fresh Young evac target. Running `minor_collect` on that mixed state works — the minor collector treats every Young block as nursery regardless of its lineage — but the memory shape is suboptimal (long-lived data that happened to fit in a sparse block gets re-tenured on the next minor).
+Major `collect()` brackets its evacuation loop with `alloc_target_gen_ = Old`, so every survivor of a major lands in an Old block. That means:
 
-Promoting everything on major is a natural follow-on and fits under the same `alloc_target_gen_` plumbing.
+- A sparse Old block's survivors stay Old (no demotion — previously they'd have been copied into a fresh Young target).
+- A sparse Young block's survivors are promoted — appropriate for generational theory: if it survived a major, it's long-lived.
+
+Dense retained blocks are not touched: a dense Young block stays Young and will get re-evacuated on the next minor. Flipping dense Young → Old in-place (a generation-tag change plus card_map reset, no copy) is a natural follow-on but hasn't been done.
+
+Old evac-target blocks with partial fill don't currently enter `small_recycle_` (that list is Young-only), so they sit unused between majors. A dedicated old-recycle list for minor-evac reuse would pick up the slack.
 
 ### Auto-collect policy
 
 Dustman decides when to collect; consumers don't have to. Two thresholds are checked at the top of each `alloc_slow_*` path (after the safepoint, guarded by `collecting_` and `auto_collect_enabled_`):
 
-- **Minor trigger.** `bytes_since_last_minor_` is bumped by `block_body_size` at every young-generation `acquire_block` and by `alloc_size` at every `alloc_huge`. When it crosses `minor_threshold_bytes_` (default 4 MiB), the next `alloc_slow_*` calls `minor_collect()`. The counter resets to 0 at the end of every minor and major.
+- **Minor trigger.** `bytes_since_last_minor_` is bumped by `block_body_size` at every young-generation `acquire_block`. Huge allocations don't contribute — they live in Old and are only reclaimed by major, so triggering a minor on a huge-heavy workload would be a no-op that just costs pause time. When the counter crosses `minor_threshold_bytes_` (default 4 MiB), the next `alloc_slow_*` calls `minor_collect()`. The counter resets to 0 at the end of every minor and major.
 - **Major trigger.** At the end of each `minor_collect`, `count_old_block_bytes()` (old blocks' body bytes plus live huge bytes) is compared to `major_threshold_bytes_`. If crossed, a `needs_major_` latch fires so the next `alloc_slow_*` calls `collect()`. After that major runs, `major_threshold_bytes_` is recomputed as `max(current_old × major_growth_factor_percent_ / 100, major_min_bytes_)` — defaults 200% growth, 16 MiB minimum.
 
 Net: a long-running mutator no longer needs to call `collect()` itself. Minor cycles fire at roughly 4 MiB of young allocation; major cycles fire when the old generation has doubled relative to its size at the previous major.

@@ -178,6 +178,21 @@ TEST_CASE("major collect after minor still works", "[minor]") {
   REQUIRE(after_major->v == 55);
 }
 
+TEST_CASE("major collect promotes evacuated survivors to Old", "[minor][major]") {
+  dustman::Root<MLeaf> r {dustman::alloc<MLeaf>()};
+  r->v = 77;
+  REQUIRE(dustman::detail::header_of(r.get())->generation
+          == dustman::detail::Generation::Young);
+
+  dustman::collect();
+
+  MLeaf* after = r.get();
+  REQUIRE(after != nullptr);
+  REQUIRE(after->v == 77);
+  REQUIRE(dustman::detail::header_of(after)->generation
+          == dustman::detail::Generation::Old);
+}
+
 TEST_CASE("concurrent minor_collect callers serialise under STW", "[minor][stw]") {
   std::atomic<int> done {0};
 

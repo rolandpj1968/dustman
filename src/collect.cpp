@@ -164,9 +164,13 @@ void collect() noexcept {
   std::uint32_t threshold = get_evacuation_threshold_percent();
   auto sparse = detail::classify_and_destroy_dead(threshold);
 
+  detail::alloc_target_gen_ = detail::Generation::Old;
   for (auto* h : sparse) {
     detail::evacuate_block(h);
   }
+  detail::alloc_target_gen_ = detail::Generation::Young;
+  detail::small_tlab = {};
+  detail::medium_tlab = {};
 
   detail::UpdateVisitor uv;
   detail::visit_roots(uv);

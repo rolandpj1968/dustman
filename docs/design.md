@@ -273,6 +273,14 @@ Per-thread nurseries are a clean win when the consumer commits to an isolation s
 
 Middle ground, which the current TLAB design already supports structurally: **shared nursery with per-thread TLABs**. Allocation locality lands for free; collection is still global. Revisit the per-thread-nursery question once Frozone's concurrency model is pinned down.
 
+### Deferred: bulk / vector root API
+
+`Root<T>` registers a single slot with `detail::register_root_slot` on construction and unregisters on destruction; its move constructor calls `detail::update_root_slot`. For bulk-init patterns like `std::vector<Root<T>>::reserve + emplace_back × N`, each reallocation moves every element and re-registers its slot — O(N) root-registry churn. A `RootedArray<T>` (single registration covering a contiguous span of `gc_ptr<T>` slots) or a bulk `RootSet` API would fix this. UX / perf polish for consumer containers; higher priority than parallel STW or per-thread nursery because it affects Frozone idioms directly.
+
+### Deferred: dense-young promotion on major
+
+Phase 3f promoted major *evacuation* survivors to Old, but dense retained Young blocks still stay Young — they get re-evacuated on the next minor. Flipping dense Young → Old in-place (a generation-tag change plus card_map reset, no copy) would complete the "every major-survivor is Old" story and save the next minor's re-promotion work. Small change; bundle with the old-recycle-list work since both involve minor/major interop.
+
 ### Deferred: flat card table via the VA arena
 
 Phase 3e landed the reserved VA arena and collapsed the barrier containment check, but cards are still per-block arrays. A flat `byte[arena_size / line_size]` indexed by `(addr - arena_base_) >> 8` would be a drop-in replacement and opens the door to SIMD card scanning (`vpmovmskb` over 16–32 cards per instruction). The per-block `card_map` in `BlockHeader` would go away, saving ~128 B per block (~0.4%) and improving locality during minor mark's dirty-card scan.
